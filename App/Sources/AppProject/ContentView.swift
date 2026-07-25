@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
@@ -6,6 +7,92 @@ struct GameItem: Identifiable, Codable {
     var name: String
     var localPath: String
     var lastPlayed: Date?
+}
+
+// MARK: - 自定义 UIViewController，用于强制横屏
+class GameViewController: UIViewController {
+    var folderURL: URL?
+    var onExit: (() -> Void)?
+    
+    private var hostingController: UIHostingController<RPGWebView>?
+    private var gearButton: UIButton!
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        
+        guard let folderURL = folderURL else { return }
+        
+        // 1. 添加 WebView（通过 SwiftUI 的 RPGWebView）
+        let webView = RPGWebView(folderURL: folderURL)
+        let host = UIHostingController(rootView: webView)
+        addChild(host)
+        view.addSubview(host.view)
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            host.view.topAnchor.constraint(equalTo: view.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        host.didMove(toParent: self)
+        hostingController = host
+        
+        // 2. 添加齿轮按钮（在左上角）
+        gearButton = UIButton(type: .system)
+        gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
+        gearButton.tintColor = .white
+        gearButton.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        gearButton.layer.cornerRadius = 20
+        gearButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(gearButton)
+        NSLayoutConstraint.activate([
+            gearButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            gearButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            gearButton.widthAnchor.constraint(equalToConstant: 40),
+            gearButton.heightAnchor.constraint(equalToConstant: 40)
+        ])
+        gearButton.addTarget(self, action: #selector(exitTapped), for: .touchUpInside)
+    }
+    
+    // ⭐ 强制横屏
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        return .landscape
+    }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        return .landscapeRight
+    }
+    override var shouldAutorotate: Bool {
+        return true
+    }
+    
+    @objc private func exitTapped() {
+        onExit?()
+    }
+    
+    deinit {
+        // 清理
+        hostingController?.willMove(toParent: nil)
+        hostingController?.view.removeFromSuperview()
+        hostingController?.removeFromParent()
+    }
+}
+
+// MARK: - UIViewControllerRepresentable 包装，用于在 SwiftUI 中使用
+struct GameView: UIViewControllerRepresentable {
+    let folderURL: URL
+    let onExit: () -> Void
+    
+    func makeUIViewController(context: Context) -> GameViewController {
+        let vc = GameViewController()
+        vc.folderURL = folderURL
+        vc.onExit = onExit
+        return vc
+    }
+    
+    func updateUIViewController(_ uiViewController: GameViewController, context: Context) {
+        // 不需要更新
+    }
 }
 
 // MARK: - 主界面
@@ -16,7 +103,6 @@ struct ContentView: View {
     @State private var isImporting = false
     @State private var importError: String?
     @State private var showErrorAlert = false
-    
     @State private var editingGameId: UUID?
     @State private var editingName: String = ""
     @State private var showRenameAlert = false
@@ -28,31 +114,15 @@ struct ContentView: View {
         NavigationStack {
             ZStack {
                 if let game = selectedGame {
-                    let gameURL = getLocalGameURL(for: game)
-                    RPGWebView(folderURL: gameURL)
-                        .ignoresSafeArea()
-                        .navigationTitle(game.name)
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Button {
-                                    // 退出游戏，恢复竖屏
-                                    forceOrientation(.portrait)
-                                    selectedGame = nil
-                                } label: {
-                                    Image(systemName: "gear")
-                                        .font(.title2)
-                                }
-                            }
-                        }
-                        .onAppear {
-                            // 进入游戏强制横屏
-                            forceOrientation(.landscapeRight)
-                        }
-                        .onDisappear {
-                            // 保险：离开时恢复竖屏
-                            forceOrientation(.portrait)
-                        }
+                    // 使用自定义 GameView，内部强制横屏
+                    GameView(folderURL: getLocalGameURL(for: game)) {
+                        // 退出游戏回调
+                        selectedGame = nil
+                    }
+                    .ignoresSafeArea()
+                    // 隐藏系统导航栏（因为我们自己管理齿轮）
+                    .navigationBarHidden(true)
+                    .navigationBarBackButtonHidden(true)
                 } else {
                     // 游戏库列表
                     VStack {
@@ -172,14 +242,11 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            // 确保启动时是竖屏
-            forceOrientation(.portrait)
             loadGames()
         }
     }
     
     // MARK: - 辅助函数
-    
     private func getLocalGameURL(for game: GameItem) -> URL {
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
         return documents.appendingPathComponent(game.localPath)
@@ -205,16 +272,6 @@ struct ContentView: View {
             }
         }
         return Image(systemName: "gamecontroller.fill")
-    }
-    
-    // MARK: - ⭐ 核心：无视锁屏强制旋转（使用 UIDevice.setValue）
-    private func forceOrientation(_ orientation: UIInterfaceOrientation) {
-        DispatchQueue.main.async {
-            // 使用 KVC 强制修改设备方向（无视用户锁）
-            UIDevice.current.setValue(orientation.rawValue, forKey: "orientation")
-            // 刷新视图控制器方向
-            UIViewController.attemptRotationToDeviceOrientation()
-        }
     }
     
     // MARK: - 导入逻辑
