@@ -12,51 +12,82 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 清理 DerivedData（避免缓存干扰）
-      - name: Clean DerivedData
+      # 获取 iOS SDK 路径
+      - name: Get SDK path
+        id: sdk
         run: |
-          rm -rf ./DerivedData || true
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
+          echo "SDKROOT=$SDK_PATH" >> $GITHUB_ENV
 
-      # 2. 列出项目中的所有 Scheme（调试用）
-      - name: List available schemes
+      # 编译所有 Swift 源文件
+      - name: Compile Swift sources
         run: |
-          echo "=== App/AppProject.xcodeproj 中的 Schemes ==="
-          xcodebuild -list -project App/AppProject.xcodeproj
-          echo ""
-          echo "=== 检查 Scheme 文件是否存在 ==="
-          ls -la App/AppProject.xcodeproj/xcshareddata/xcschemes/ || echo "Scheme 目录不存在"
+          mkdir -p build
+          swiftc \
+            -target arm64-apple-ios16.0 \
+            -sdk $SDK_PATH \
+            -emit-executable \
+            -module-name TEXT \
+            -o build/TEXT \
+            App/Sources/AppProject/*.swift \
+            -framework UIKit \
+            -framework SwiftUI \
+            -framework WebKit \
+            -parse-as-library
 
-      # 3. 构建未签名的 .app
-      - name: Build .app (unsigned)
+      # 创建 .app 包结构
+      - name: Create .app bundle
         run: |
-          xcodebuild build \
-            -project App/AppProject.xcodeproj \
-            -scheme AppProject \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath ./DerivedData \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            IPHONEOS_DEPLOYMENT_TARGET=16.0
+          mkdir -p Payload/TEXT.app
+          cp build/TEXT Payload/TEXT.app/
+          
+          # 生成 Info.plist
+          cat > Payload/TEXT.app/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>TEXT</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.example.TEXT</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>TEXT</string>
+              <key>CFBundleDisplayName</key>
+              <string>TEXT</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UIFileSharingEnabled</key>
+              <true/>
+              <key>LSSupportsOpeningDocumentsInPlace</key>
+              <true/>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
 
-      # 4. 查找并打包 IPA
+      # 打包成 IPA
       - name: Package IPA
         run: |
-          APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
-          if [ -z "$APP_PATH" ]; then
-            echo "❌ 未找到编译生成的 .app 文件"
-            exit 1
-          fi
-          echo "✅ 找到 .app 路径：$APP_PATH"
-          mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
           zip -r TEXT.ipa Payload/
-          echo "✅ IPA 打包完成"
 
-      # 5. 上传 IPA
+      # 上传 IPA
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
