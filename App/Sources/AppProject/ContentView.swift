@@ -25,6 +25,7 @@ class GameViewController: UIViewController {
         // 添加 WebView
         let webView = RPGWebView(folderURL: folderURL)
         let host = UIHostingController(rootView: webView)
+        host.view.backgroundColor = .black   // 新增：host 视图背景黑色
         addChild(host)
         view.addSubview(host.view)
         host.view.translatesAutoresizingMaskIntoConstraints = false
