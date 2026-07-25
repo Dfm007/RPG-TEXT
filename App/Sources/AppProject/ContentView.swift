@@ -21,6 +21,9 @@ struct ContentView: View {
     @State private var editingName: String = ""
     @State private var showRenameAlert = false
     
+    // 用于控制屏幕方向
+    @State private var isLandscape = false
+    
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
     
@@ -35,8 +38,10 @@ struct ContentView: View {
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
-                                // ⭐ 返回按钮改成齿轮图标
                                 Button {
+                                    // 退出游戏，恢复竖屏
+                                    isLandscape = false
+                                    forceOrientation(.portrait)
                                     selectedGame = nil
                                 } label: {
                                     Image(systemName: "gear")
@@ -46,10 +51,12 @@ struct ContentView: View {
                         }
                         // ⭐ 进入游戏时强制横屏
                         .onAppear {
+                            isLandscape = true
                             forceOrientation(.landscapeRight)
                         }
-                        // ⭐ 退出游戏时恢复竖屏
+                        // ⭐ 退出游戏时恢复竖屏（以防万一）
                         .onDisappear {
+                            isLandscape = false
                             forceOrientation(.portrait)
                         }
                 } else {
@@ -204,10 +211,31 @@ struct ContentView: View {
         return Image(systemName: "gamecontroller.fill")
     }
     
-    // MARK: - 强制横屏/竖屏
+    // MARK: - ⭐ 强制横屏/竖屏（使用 UIWindowScene 方式）
     private func forceOrientation(_ orientation: UIInterfaceOrientation) {
-        // 使用 KVC 强制旋转（广泛使用，简单有效）
-        UIDevice.current.setValue(orientation.rawValue, forKey: "orientation")
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
+            return
+        }
+        
+        // 设置支持的方向
+        let supportedOrientations: UIInterfaceOrientationMask
+        switch orientation {
+        case .portrait:
+            supportedOrientations = .portrait
+        case .landscapeLeft, .landscapeRight:
+            supportedOrientations = .landscape
+        default:
+            supportedOrientations = .portrait
+        }
+        
+        // 通过 UIWindowScene 请求几何更新
+        let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(
+            interfaceOrientations: supportedOrientations
+        )
+        
+        windowScene.requestGeometryUpdate(geometryPreferences) { error in
+            print("横屏切换失败: \(error.localizedDescription)")
+        }
     }
     
     // MARK: - 导入逻辑
