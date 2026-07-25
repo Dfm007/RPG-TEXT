@@ -3,7 +3,7 @@ on:
   push:
   workflow_dispatch:
 
-# 强制 GitHub Actions 使用 Node.js 24 运行所有 JavaScript actions，消除弃用警告
+# 强制 GitHub Actions 使用 Node.js 24，消除废弃警告
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -13,14 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 临时屏蔽根目录的 Package.swift，避免 xcodebuild 误将其当作工作区解析
+      # 屏蔽根目录的 Package.swift，避免干扰
       - name: Disable root SPM
         run: |
           if [ -f Package.swift ]; then mv Package.swift Package.swift.bak; fi
           if [ -f Package.resolved ]; then mv Package.resolved Package.resolved.bak; fi
           if [ -f .gitmodules ]; then mv .gitmodules .gitmodules.bak; fi
 
-      # 查看当前目录结构和项目 Scheme（方便调试）
+      # 查看项目信息（方便核对 Scheme 名称）
       - name: List project info
         run: |
           echo "当前目录："
@@ -30,7 +30,7 @@ jobs:
           echo "Xcode 项目可用 Schemes："
           xcodebuild -list -project App/AppProject.xcodeproj
 
-      # 直接编译 .app（不经过 Archive，对签名缺失更宽容）
+      # 直接编译 .app（跳过签名）
       - name: Build .app (unsigned)
         run: |
           xcodebuild build \
@@ -45,10 +45,9 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER=""
 
-      # 手动打包成 IPA（将 .app 放入 Payload 文件夹并压缩）
+      # 手动打包成 IPA（文件名改为 TEXT.ipa）
       - name: Package IPA
         run: |
-          # 查找编译出的 .app 文件（通常在 DerivedData 中）
           APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
             echo "错误：未找到编译生成的 .app 文件"
@@ -57,11 +56,11 @@ jobs:
           echo "找到 .app 路径：$APP_PATH"
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          zip -r TEXT.ipa Payload/
+          zip -r TEXT.ipa Payload/               # 这里改成 TEXT.ipa
 
-      # 上传 IPA 作为 Artifact
+      # 上传 IPA（Artifact 名称也改成 TEXT-unsigned）
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: TEXT-unsigned
-          path: TEXT.ipa
+          name: TEXT-unsigned                    # 这里改成 TEXT-unsigned
+          path: TEXT.ipa                         # 对应上面的文件名
