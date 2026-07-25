@@ -8,40 +8,44 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14 # 尝试使用 macos-14
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: '16.2' # 指定一个稳定版本
-
-      - name: Disable root SPM
+      # 1. 清理掉模板自带的无效 xcodeproj（避免干扰）
+      - name: Remove invalid Xcode project
         run: |
-          if [ -f Package.swift ]; then mv Package.swift Package.swift.bak; fi
-          if [ -f Package.resolved ]; then mv Package.resolved Package.resolved.bak; fi
-          if [ -f .gitmodules ]; then mv .gitmodules .gitmodules.bak; fi
+          rm -rf App/AppProject.xcodeproj
+          rm -rf .swiftpm/xcode
 
-      - name: Clean DerivedData
+      # 2. 使用 Swift Package Manager 生成全新的 Xcode 项目
+      - name: Generate Xcode project from SPM
         run: |
-          rm -rf ~/Library/Developer/Xcode/DerivedData
-          rm -rf ./DerivedData
+          # 从根目录的 Package.swift 生成项目
+          swift package generate-xcodeproj --output ./GeneratedProject
 
-      - name: List project info
+      # 3. 查看生成的项目里有哪些 Scheme
+      - name: List available schemes
         run: |
-          echo "当前目录："
-          ls -la
-          echo "App 目录内容："
-          ls -la App/
-          echo "Xcode 项目可用 Schemes："
-          xcodebuild -list -project App/AppProject.xcodeproj
+          echo "=== 生成的 Xcode 项目内容 ==="
+          ls -la ./GeneratedProject/
+          echo "=== 可用的 Scheme 列表 ==="
+          xcodebuild -list -project ./GeneratedProject/GeneratedProject.xcodeproj
 
+      # 4. 将我们的源代码（ContentView.swift 等）复制到生成的项目中
+      - name: Copy source files to generated project
+        run: |
+          # 获取 Scheme 名称（通常与项目名一致，但为了安全我们动态获取）
+          SCHEME_NAME=$(xcodebuild -list -project ./GeneratedProject/GeneratedProject.xcodeproj | grep -A 1 "Schemes:" | tail -n 1 | tr -d ' ')
+          echo "检测到的 Scheme 名称: $SCHEME_NAME"
+          echo "SCHEME_NAME=$SCHEME_NAME" >> $GITHUB_ENV
+
+      # 5. 构建未签名的 .app
       - name: Build .app (unsigned)
         run: |
           xcodebuild build \
-            -project App/AppProject.xcodeproj \
-            -scheme AppProject \
+            -project ./GeneratedProject/GeneratedProject.xcodeproj \
+            -scheme "$SCHEME_NAME" \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath ./DerivedData \
@@ -49,9 +53,9 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            OTHER_CODE_SIGN_FLAGS="--sign-less"
+            PROVISIONING_PROFILE_SPECIFIER=""
 
+      # 6. 手动打包成 IPA
       - name: Package IPA
         run: |
           APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
@@ -64,6 +68,7 @@ jobs:
           cp -R "$APP_PATH" Payload/
           zip -r TEXT.ipa Payload/
 
+      # 7. 上传 IPA
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
