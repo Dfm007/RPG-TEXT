@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
@@ -7,134 +6,6 @@ struct GameItem: Identifiable, Codable {
     var name: String
     var localPath: String
     var lastPlayed: Date?
-}
-
-// MARK: - 强制横屏的 UIViewController
-class GameViewController: UIViewController {
-    var folderURL: URL?
-    var onExit: (() -> Void)?
-    private var hostingController: UIHostingController<RPGWebView>?
-    private var gearButton: UIButton!
-    
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .black
-        
-        guard let folderURL = folderURL else { return }
-        
-        // 添加 WebView
-        let webView = RPGWebView(folderURL: folderURL)
-        let host = UIHostingController(rootView: webView)
-        addChild(host)
-        view.addSubview(host.view)
-        host.view.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            host.view.topAnchor.constraint(equalTo: view.topAnchor),
-            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-        ])
-        host.didMove(toParent: self)
-        hostingController = host
-        
-        // 齿轮按钮
-        gearButton = UIButton(type: .system)
-        gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
-        gearButton.tintColor = .white
-        gearButton.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        gearButton.layer.cornerRadius = 20
-        gearButton.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(gearButton)
-        NSLayoutConstraint.activate([
-            gearButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            gearButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            gearButton.widthAnchor.constraint(equalToConstant: 40),
-            gearButton.heightAnchor.constraint(equalToConstant: 40)
-        ])
-        gearButton.addTarget(self, action: #selector(exitTapped), for: .touchUpInside)
-    }
-    
-    // ⭐ 强制横屏
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        return .landscape
-    }
-    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
-        return .landscapeRight
-    }
-    override var shouldAutorotate: Bool {
-        return true
-    }
-    
-    @objc private func exitTapped() {
-        onExit?()
-    }
-    
-    deinit {
-        hostingController?.willMove(toParent: nil)
-        hostingController?.view.removeFromSuperview()
-        hostingController?.removeFromParent()
-    }
-}
-
-// MARK: - UIViewControllerRepresentable
-struct GameView: UIViewControllerRepresentable {
-    let folderURL: URL
-    let onExit: () -> Void
-    
-    func makeUIViewController(context: Context) -> GameViewController {
-        let vc = GameViewController()
-        vc.folderURL = folderURL
-        vc.onExit = onExit
-        return vc
-    }
-    
-    func updateUIViewController(_ uiViewController: GameViewController, context: Context) {}
-}
-
-// MARK: - 全屏覆盖工具（核心：将 GameViewController 添加到 UIWindow 上）
-class GameOverlayManager {
-    static let shared = GameOverlayManager()
-    private var gameWindow: UIWindow?
-    private var gameVC: GameViewController?
-    
-    func showGame(folderURL: URL, onExit: @escaping () -> Void) {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
-            return
-        }
-        
-        // 创建独立的 UIWindow
-        let window = UIWindow(windowScene: windowScene)
-        window.windowLevel = .alert + 1  // 覆盖所有其他视图
-        window.backgroundColor = .black
-        
-        let vc = GameViewController()
-        vc.folderURL = folderURL
-        vc.onExit = { [weak self] in
-            self?.hideGame()
-            onExit()
-        }
-        window.rootViewController = vc
-        
-        // 强制横屏（在 window 显示前设置）
-        window.makeKeyAndVisible()
-        
-        // 强制旋转
-        UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
-        UIViewController.attemptRotationToDeviceOrientation()
-        
-        self.gameWindow = window
-        self.gameVC = vc
-    }
-    
-    func hideGame() {
-        gameWindow?.isHidden = true
-        gameWindow = nil
-        gameVC = nil
-        
-        // 恢复竖屏
-        UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
-        UIViewController.attemptRotationToDeviceOrientation()
-    }
 }
 
 // MARK: - 主界面
@@ -145,6 +16,7 @@ struct ContentView: View {
     @State private var isImporting = false
     @State private var importError: String?
     @State private var showErrorAlert = false
+    
     @State private var editingGameId: UUID?
     @State private var editingName: String = ""
     @State private var showRenameAlert = false
@@ -156,19 +28,24 @@ struct ContentView: View {
         NavigationStack {
             ZStack {
                 if let game = selectedGame {
-                    // 使用全屏覆盖方式打开游戏
-                    Color.clear
-                        .onAppear {
-                            GameOverlayManager.shared.showGame(folderURL: getLocalGameURL(for: game)) {
-                                selectedGame = nil
+                    let gameURL = getLocalGameURL(for: game)
+                    // ⭐ 黑边修复：整个游戏视图背景设为黑色
+                    Color.black
+                        .ignoresSafeArea()
+                        .overlay(
+                            RPGWebView(folderURL: gameURL)
+                                .ignoresSafeArea()
+                        )
+                        .navigationTitle(game.name)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarLeading) {
+                                Button("返回") {
+                                    selectedGame = nil
+                                }
                             }
                         }
-                        .onDisappear {
-                            GameOverlayManager.shared.hideGame()
-                        }
-                        .ignoresSafeArea()
                 } else {
-                    // 游戏库列表
                     VStack {
                         if games.isEmpty {
                             VStack(spacing: 20) {
@@ -187,6 +64,7 @@ struct ContentView: View {
                             List {
                                 ForEach(games) { game in
                                     HStack(spacing: 12) {
+                                        // 游戏图标
                                         gameIcon(for: game)
                                             .resizable()
                                             .frame(width: 50, height: 50)
@@ -291,6 +169,7 @@ struct ContentView: View {
     }
     
     // MARK: - 辅助函数
+    
     private func getLocalGameURL(for game: GameItem) -> URL {
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
         return documents.appendingPathComponent(game.localPath)
@@ -302,6 +181,7 @@ struct ContentView: View {
         return formatter.string(from: date)
     }
     
+    // MARK: - 读取游戏图标
     private func gameIcon(for game: GameItem) -> Image {
         let gameURL = getLocalGameURL(for: game)
         let iconDir = gameURL.appendingPathComponent("icon")
