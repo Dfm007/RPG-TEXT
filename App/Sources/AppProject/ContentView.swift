@@ -35,12 +35,25 @@ struct ContentView: View {
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
-                                Button("返回") {
+                                // ⭐ 返回按钮改成齿轮图标
+                                Button {
                                     selectedGame = nil
+                                } label: {
+                                    Image(systemName: "gear")
+                                        .font(.title2)
                                 }
                             }
                         }
+                        // ⭐ 进入游戏时强制横屏
+                        .onAppear {
+                            forceOrientation(.landscapeRight)
+                        }
+                        // ⭐ 退出游戏时恢复竖屏
+                        .onDisappear {
+                            forceOrientation(.portrait)
+                        }
                 } else {
+                    // 游戏库列表（和之前一样）
                     VStack {
                         if games.isEmpty {
                             VStack(spacing: 20) {
@@ -59,7 +72,6 @@ struct ContentView: View {
                             List {
                                 ForEach(games) { game in
                                     HStack(spacing: 12) {
-                                        // ⭐ 新增：游戏图标
                                         gameIcon(for: game)
                                             .resizable()
                                             .frame(width: 50, height: 50)
@@ -176,13 +188,11 @@ struct ContentView: View {
         return formatter.string(from: date)
     }
     
-    // MARK: - ⭐ 读取游戏图标（新增）
     private func gameIcon(for game: GameItem) -> Image {
         let gameURL = getLocalGameURL(for: game)
         let iconDir = gameURL.appendingPathComponent("icon")
         let possibleExtensions = ["png", "jpg", "jpeg", "icon"]
         
-        // 尝试遍历所有可能的扩展名
         for ext in possibleExtensions {
             let fileURL = iconDir.appendingPathExtension(ext)
             if fileManager.fileExists(atPath: fileURL.path) {
@@ -191,8 +201,13 @@ struct ContentView: View {
                 }
             }
         }
-        // 都没找到，返回默认占位图标
         return Image(systemName: "gamecontroller.fill")
+    }
+    
+    // MARK: - 强制横屏/竖屏
+    private func forceOrientation(_ orientation: UIInterfaceOrientation) {
+        // 使用 KVC 强制旋转（广泛使用，简单有效）
+        UIDevice.current.setValue(orientation.rawValue, forKey: "orientation")
     }
     
     // MARK: - 导入逻辑
