@@ -9,11 +9,10 @@ struct GameItem: Identifiable, Codable {
     var lastPlayed: Date?
 }
 
-// MARK: - 自定义 UIViewController，用于强制横屏
+// MARK: - 强制横屏的 UIViewController
 class GameViewController: UIViewController {
     var folderURL: URL?
     var onExit: (() -> Void)?
-    
     private var hostingController: UIHostingController<RPGWebView>?
     private var gearButton: UIButton!
     
@@ -23,7 +22,7 @@ class GameViewController: UIViewController {
         
         guard let folderURL = folderURL else { return }
         
-        // 1. 添加 WebView（通过 SwiftUI 的 RPGWebView）
+        // 添加 WebView
         let webView = RPGWebView(folderURL: folderURL)
         let host = UIHostingController(rootView: webView)
         addChild(host)
@@ -38,7 +37,7 @@ class GameViewController: UIViewController {
         host.didMove(toParent: self)
         hostingController = host
         
-        // 2. 添加齿轮按钮（在左上角）
+        // 齿轮按钮
         gearButton = UIButton(type: .system)
         gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
         gearButton.tintColor = .white
@@ -71,14 +70,13 @@ class GameViewController: UIViewController {
     }
     
     deinit {
-        // 清理
         hostingController?.willMove(toParent: nil)
         hostingController?.view.removeFromSuperview()
         hostingController?.removeFromParent()
     }
 }
 
-// MARK: - UIViewControllerRepresentable 包装，用于在 SwiftUI 中使用
+// MARK: - UIViewControllerRepresentable
 struct GameView: UIViewControllerRepresentable {
     let folderURL: URL
     let onExit: () -> Void
@@ -90,8 +88,52 @@ struct GameView: UIViewControllerRepresentable {
         return vc
     }
     
-    func updateUIViewController(_ uiViewController: GameViewController, context: Context) {
-        // 不需要更新
+    func updateUIViewController(_ uiViewController: GameViewController, context: Context) {}
+}
+
+// MARK: - 全屏覆盖工具（核心：将 GameViewController 添加到 UIWindow 上）
+class GameOverlayManager {
+    static let shared = GameOverlayManager()
+    private var gameWindow: UIWindow?
+    private var gameVC: GameViewController?
+    
+    func showGame(folderURL: URL, onExit: @escaping () -> Void) {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
+            return
+        }
+        
+        // 创建独立的 UIWindow
+        let window = UIWindow(windowScene: windowScene)
+        window.windowLevel = .alert + 1  // 覆盖所有其他视图
+        window.backgroundColor = .black
+        
+        let vc = GameViewController()
+        vc.folderURL = folderURL
+        vc.onExit = { [weak self] in
+            self?.hideGame()
+            onExit()
+        }
+        window.rootViewController = vc
+        
+        // 强制横屏（在 window 显示前设置）
+        window.makeKeyAndVisible()
+        
+        // 强制旋转
+        UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
+        UIViewController.attemptRotationToDeviceOrientation()
+        
+        self.gameWindow = window
+        self.gameVC = vc
+    }
+    
+    func hideGame() {
+        gameWindow?.isHidden = true
+        gameWindow = nil
+        gameVC = nil
+        
+        // 恢复竖屏
+        UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+        UIViewController.attemptRotationToDeviceOrientation()
     }
 }
 
@@ -114,15 +156,17 @@ struct ContentView: View {
         NavigationStack {
             ZStack {
                 if let game = selectedGame {
-                    // 使用自定义 GameView，内部强制横屏
-                    GameView(folderURL: getLocalGameURL(for: game)) {
-                        // 退出游戏回调
-                        selectedGame = nil
-                    }
-                    .ignoresSafeArea()
-                    // 隐藏系统导航栏（因为我们自己管理齿轮）
-                    .navigationBarHidden(true)
-                    .navigationBarBackButtonHidden(true)
+                    // 使用全屏覆盖方式打开游戏
+                    Color.clear
+                        .onAppear {
+                            GameOverlayManager.shared.showGame(folderURL: getLocalGameURL(for: game)) {
+                                selectedGame = nil
+                            }
+                        }
+                        .onDisappear {
+                            GameOverlayManager.shared.hideGame()
+                        }
+                        .ignoresSafeArea()
                 } else {
                     // 游戏库列表
                     VStack {
