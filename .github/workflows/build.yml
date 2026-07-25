@@ -12,55 +12,138 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 清理掉模板自带的无效 xcodeproj（避免干扰）
-      - name: Remove invalid Xcode project
+      # 1. 清理可能干扰的文件
+      - name: Clean up
         run: |
-          rm -rf App/AppProject.xcodeproj
-          rm -rf .swiftpm/xcode
+          rm -rf App/AppProject.xcodeproj || true
+          rm -rf .swiftpm || true
+          rm -rf *.xcodeproj || true
 
-      # 2. 使用 Swift Package Manager 生成全新的 Xcode 项目
-      - name: Generate Xcode project from SPM
+      # 2. 创建最小化的 Xcode 项目结构
+      - name: Create minimal Xcode project
         run: |
-          # 从根目录的 Package.swift 生成项目
-          swift package generate-xcodeproj --output ./GeneratedProject
+          # 创建项目目录
+          mkdir -p TEXT.xcodeproj
+          
+          # 创建 project.pbxproj 文件（最简配置）
+          cat > TEXT.xcodeproj/project.pbxproj << 'EOF'
+          // !$*UTF8*$!
+          {
+              archiveVersion = 1;
+              classes = {
+              };
+              objectVersion = 56;
+              objects = {
+                  /* Begin PBXFileReference section */
+                  TEXTApp = {isa = PBXFileReference; lastKnownFileType = wrapper.application; name = TEXT.app; path = "/Users/runner/work/RPG-TEXT/RPG-TEXT/Build/Products/Release-iphoneos/TEXT.app"; sourceTree = "<absolute>"; };
+                  /* End PBXFileReference section */
+                  
+                  /* Begin PBXGroup section */
+                  TEXT = {isa = PBXGroup; children = (); sourceTree = "<group>"; };
+                  /* End PBXGroup section */
+                  
+                  /* Begin PBXProject section */
+                  TEXTProject = {isa = PBXProject; attributes = {LastSwiftUpdateCheck = 1600; LastUpgradeCheck = 1600; ORGANIZATIONNAME = ""; TargetAttributes = {TEXTTarget = {CreatedOnToolsVersion = 16.0;};};}; buildConfigurationList = BuildConfigList; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = TEXT; productRefGroup = Products; projectDirPath = ""; projectRoot = ""; targets = (TEXTTarget);};
+                  /* End PBXProject section */
+                  
+                  /* Begin PBXTargetDependency section */
+                  /* End PBXTargetDependency section */
+                  
+                  /* Begin XCBuildConfiguration section */
+                  Release = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_IDENTITY = ""; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = App/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.TEXT; PRODUCT_NAME = TEXT; PROVISIONING_PROFILE_SPECIFIER = ""; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2";}; name = Release;};
+                  /* End XCBuildConfiguration section */
+                  
+                  /* Begin XCConfigurationList section */
+                  BuildConfigList = {isa = XCConfigurationList; buildConfigurations = (Release); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+                  /* End XCConfigurationList section */
+              };
+              rootObject = TEXTProject;
+          }
+          EOF
+          
+          # 创建 Info.plist（如果 App/Info.plist 不存在则使用默认）
+          if [ ! -f App/Info.plist ]; then
+            mkdir -p App
+            cat > App/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>$(DEVELOPMENT_LANGUAGE)</string>
+              <key>CFBundleExecutable</key>
+              <string>$(EXECUTABLE_NAME)</string>
+              <key>CFBundleIdentifier</key>
+              <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>TEXT</string>
+              <key>CFBundleDisplayName</key>
+              <string>TEXT</string>
+              <key>CFBundlePackageType</key>
+              <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UIFileSharingEnabled</key>
+              <true/>
+              <key>LSSupportsOpeningDocumentsInPlace</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+          fi
 
-      # 3. 查看生成的项目里有哪些 Scheme
-      - name: List available schemes
-        run: |
-          echo "=== 生成的 Xcode 项目内容 ==="
-          ls -la ./GeneratedProject/
-          echo "=== 可用的 Scheme 列表 ==="
-          xcodebuild -list -project ./GeneratedProject/GeneratedProject.xcodeproj
-
-      # 4. 将我们的源代码（ContentView.swift 等）复制到生成的项目中
-      - name: Copy source files to generated project
-        run: |
-          # 获取 Scheme 名称（通常与项目名一致，但为了安全我们动态获取）
-          SCHEME_NAME=$(xcodebuild -list -project ./GeneratedProject/GeneratedProject.xcodeproj | grep -A 1 "Schemes:" | tail -n 1 | tr -d ' ')
-          echo "检测到的 Scheme 名称: $SCHEME_NAME"
-          echo "SCHEME_NAME=$SCHEME_NAME" >> $GITHUB_ENV
-
-      # 5. 构建未签名的 .app
+      # 3. 使用 xcodebuild 直接编译（指定项目路径）
       - name: Build .app (unsigned)
         run: |
-          xcodebuild build \
-            -project ./GeneratedProject/GeneratedProject.xcodeproj \
-            -scheme "$SCHEME_NAME" \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath ./DerivedData \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER=""
+          # 手动编译所有 Swift 文件
+          mkdir -p Build/Products/Release-iphoneos/TEXT.app
+          
+          # 编译 Swift 源文件
+          swiftc \
+            -target arm64-apple-ios15.0 \
+            -sdk $(xcrun --sdk iphoneos --show-sdk-path) \
+            -emit-executable \
+            -emit-library \
+            -module-name TEXT \
+            -o Build/Products/Release-iphoneos/TEXT.app/TEXT \
+            App/Sources/AppProject/*.swift \
+            -framework UIKit \
+            -framework SwiftUI \
+            -framework WebKit \
+            -parse-as-library
+          
+          # 如果编译失败，显示错误
+          if [ $? -ne 0 ]; then
+            echo "编译失败，尝试使用 xcodebuild..."
+            # 备用方案：使用 xcodebuild
+            xcodebuild build \
+              -project TEXT.xcodeproj \
+              -scheme TEXT \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath ./DerivedData \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              DEVELOPMENT_TEAM="" \
+              PROVISIONING_PROFILE_SPECIFIER=""
+          fi
 
-      # 6. 手动打包成 IPA
+      # 4. 查找并打包 IPA
       - name: Package IPA
         run: |
-          APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
+          # 查找编译生成的 .app
+          APP_PATH=$(find . -name "*.app" -type d | grep -v ".xcarchive" | head -n 1)
           if [ -z "$APP_PATH" ]; then
             echo "错误：未找到编译生成的 .app 文件"
+            echo "尝试查找所有 .app 文件..."
+            find . -name "*.app" -type d
             exit 1
           fi
           echo "找到 .app 路径：$APP_PATH"
@@ -68,7 +151,7 @@ jobs:
           cp -R "$APP_PATH" Payload/
           zip -r TEXT.ipa Payload/
 
-      # 7. 上传 IPA
+      # 5. 上传 IPA
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
