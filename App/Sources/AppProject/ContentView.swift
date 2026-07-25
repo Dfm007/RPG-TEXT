@@ -213,17 +213,20 @@ struct ContentView: View {
                                         
                                         Spacer()
                                         
+                                        // 1️⃣ 编辑图标：更换为正方形风格图标
                                         Button {
                                             menuGameId = game.id
                                             showEditMenu = true
                                         } label: {
-                                            Image(systemName: "pencil.circle")
+                                            Image(systemName: "square.and.pencil")
                                                 .font(.title3)
                                                 .foregroundColor(.gray)
                                         }
                                         .buttonStyle(.plain)
                                         
-                                        Image(systemName: "chevron.right")
+                                        // 2️⃣ 启动图标：更换为播放电视风格图标
+                                        Image(systemName: "play.circle")
+                                            .font(.title3)
                                             .foregroundColor(.gray)
                                     }
                                     .contentShape(Rectangle())
@@ -231,7 +234,12 @@ struct ContentView: View {
                                         selectedGame = game
                                         updateLastPlayed(for: game.id)
                                     }
+                                    // 3️⃣ 长按菜单：新增「修改图标」
                                     .contextMenu {
+                                        Button("修改图标") {
+                                            pickerGameId = game.id
+                                            showIconPicker = true
+                                        }
                                         Button("重命名") {
                                             editingGameId = game.id
                                             editingName = game.name
@@ -300,15 +308,15 @@ struct ContentView: View {
                 editingGameId = nil
             }
         }
-        // ⭐ 编辑菜单 - 内容为 [修改图标] 与 [重命名]
+        // 铅笔按钮点击弹出的菜单（保留）
         .confirmationDialog("编辑游戏", isPresented: $showEditMenu, titleVisibility: .visible) {
-            Button("修改图标") {          // ⬅️ 点击后修改图标
+            Button("修改图标") {
                 if let id = menuGameId {
                     pickerGameId = id
                     showIconPicker = true
                 }
             }
-            Button("重命名") {            // ⬅️ 点击后修改名称
+            Button("重命名") {
                 if let id = menuGameId,
                    let game = games.first(where: { $0.id == id }) {
                     editingGameId = id
