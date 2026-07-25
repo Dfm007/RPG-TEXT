@@ -29,13 +29,9 @@ struct ContentView: View {
             ZStack {
                 if let game = selectedGame {
                     let gameURL = getLocalGameURL(for: game)
-                    // ⭐ 黑边修复：整个游戏视图背景设为黑色
-                    Color.black
+                    // ⭐ 直接使用 RPGWebView，不再额外包裹 Color.black
+                    RPGWebView(folderURL: gameURL)
                         .ignoresSafeArea()
-                        .overlay(
-                            RPGWebView(folderURL: gameURL)
-                                .ignoresSafeArea()
-                        )
                         .navigationTitle(game.name)
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
