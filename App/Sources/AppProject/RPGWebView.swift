@@ -2,29 +2,44 @@ import SwiftUI
 import WebKit
 
 struct RPGWebView: UIViewRepresentable {
-    let gamePath: URL          // 游戏根目录（解压后的文件夹）
-    @Binding var isLoading: Bool // 可选，用于加载状态
+    let gamePath: URL
+    @Binding var isLoading: Bool
+    let onWebViewCreated: ((WKWebView) -> Void)?   // 新增：获取 webView 引用
+
+    // 主要初始化（保留原有参数）
+    init(gamePath: URL, isLoading: Binding<Bool> = .constant(false), onWebViewCreated: ((WKWebView) -> Void)? = nil) {
+        self.gamePath = gamePath
+        self._isLoading = isLoading
+        self.onWebViewCreated = onWebViewCreated
+    }
+
+    // 新增便利初始化，专门匹配 ContentView 中的调用（folderURL 标签 + 尾随闭包）
+    init(folderURL: URL, onWebViewCreated: ((WKWebView) -> Void)? = nil) {
+        self.gamePath = folderURL
+        self._isLoading = .constant(false)   // 默认值
+        self.onWebViewCreated = onWebViewCreated
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
-        
-        // 注册消息处理器（名称必须与 JS 端一致）
+
+        // 注册消息处理器
         contentController.add(context.coordinator, name: "saveGameFile")
-        contentController.add(context.coordinator, name: "loadGameFile") // 为后续读取做准备
-        
-        // 注入桥接 JS 脚本（在页面加载前执行）
+        contentController.add(context.coordinator, name: "loadGameFile")
+
+        // 注入桥接 JS 脚本（页面加载前执行）
         let bridgeScript = WKUserScript(
             source: getBridgeJavaScript(),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         )
         contentController.addUserScript(bridgeScript)
-        
+
         config.userContentController = contentController
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
-        
+
         // 加载 index.html
         let indexURL = gamePath.appendingPathComponent("index.html")
         if FileManager.default.fileExists(atPath: indexURL.path) {
@@ -32,6 +47,12 @@ struct RPGWebView: UIViewRepresentable {
         } else {
             print("❌ 未找到 index.html")
         }
+
+        // 回调给外部（用于音频恢复等）
+        DispatchQueue.main.async {
+            self.onWebViewCreated?(webView)
+        }
+
         return webView
     }
 
@@ -47,7 +68,7 @@ struct RPGWebView: UIViewRepresentable {
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         let gamePath: URL
         let saveDir: URL
-        
+
         init(gamePath: URL) {
             self.gamePath = gamePath
             self.saveDir = gamePath.appendingPathComponent("save")
@@ -55,7 +76,7 @@ struct RPGWebView: UIViewRepresentable {
             // 确保 save 文件夹存在
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true, attributes: nil)
         }
-        
+
         // 接收来自 JS 的消息
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             switch message.name {
@@ -67,7 +88,7 @@ struct RPGWebView: UIViewRepresentable {
                 break
             }
         }
-        
+
         // 保存存档
         private func handleSaveGameFile(message: WKScriptMessage) {
             guard let dict = message.body as? [String: Any],
@@ -84,13 +105,13 @@ struct RPGWebView: UIViewRepresentable {
                 print("❌ 写入存档失败：\(error)")
             }
         }
-        
-        // 读取存档（为以后实现“从外部加载”做准备，可先留空）
+
+        // 读取存档（预留）
         private func handleLoadGameFile(message: WKScriptMessage) {
             // 暂不实现，留作扩展
         }
-        
-        // 可选：页面加载完成后注入额外脚本
+
+        // 页面加载完成（可选）
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             // 可以通知 JS 已经准备好，或者注入其他脚本
         }
@@ -100,25 +121,17 @@ struct RPGWebView: UIViewRepresentable {
     private func getBridgeJavaScript() -> String {
         return """
         (function() {
-            // 确保 StorageManager 存在
             if (typeof StorageManager === 'undefined') {
                 console.warn('StorageManager not found, bridge may not work.');
                 return;
             }
-            
-            // 保存原始方法
+
             var originalSave = StorageManager.save;
-            var originalLoad = StorageManager.load;
-            
-            // 重写 save
             StorageManager.save = function(savefile) {
-                // 获取存档槽位（savefileId 通常为 1~N）
                 var fileId = savefile.savefileId || 1;
                 var fileName = 'file' + fileId + '.rpgsave';
-                // 将存档对象转为 JSON 字符串（与 .rpgsave 内容一致）
                 var data = JSON.stringify(savefile);
-                
-                // 发送给 Native
+
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
                     window.webkit.messageHandlers.saveGameFile.postMessage({
                         fileName: fileName,
@@ -128,13 +141,10 @@ struct RPGWebView: UIViewRepresentable {
                 } else {
                     console.warn('Native bridge not available, fallback to localStorage');
                 }
-                
-                // 仍然调用原始方法以保持 localStorage 同步（防止游戏代码检查）
+
                 return originalSave.call(this, savefile);
             };
-            
-            // 重写 load（可扩展为从 Native 读取，但为了简化，这里保持原样，让游戏使用 localStorage）
-            // 如果你想实现“外部导入后游戏内自动加载”，可在这里添加逻辑，但我们先不覆盖。
+
             console.log('✅ RPG Maker 文件桥接已注入 (保存拦截)');
         })();
         """
