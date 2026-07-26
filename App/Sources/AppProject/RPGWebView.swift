@@ -101,7 +101,7 @@ struct RPGWebView: UIViewRepresentable {
             case "loadGameFile":
                 break
             case "bridgeReady":
-                log("📨 Bridge 状态: \(message.body)")
+                log("📨 \(message.body)")
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -125,10 +125,8 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - WKNavigationDelegate
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             log("🌐 页面加载完成")
-
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -146,6 +144,7 @@ struct RPGWebView: UIViewRepresentable {
                         self.log("✅ 延迟注入成功")
                     }
                 }
+                // 检查 StorageManager 状态
                 let checkScript = """
                 (function() {
                     var status = '未定义';
@@ -170,8 +169,8 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - JavaScript 桥接代码（静态方法）
-    static func bridgeJavaScript() -> String {
+    // MARK: - Static JavaScript
+    private static func bridgeJavaScript() -> String {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
@@ -188,9 +187,20 @@ struct RPGWebView: UIViewRepresentable {
 
             var originalSave = StorageManager.save;
             StorageManager.save = function(savefile) {
+                // 先调用原始方法，确保 localStorage 被更新
+                var result = originalSave.call(this, savefile);
+
+                // 然后发送给 Native
                 var fileId = savefile.savefileId || 1;
                 var fileName = 'file' + fileId + '.rpgsave';
                 var data = JSON.stringify(savefile);
+
+                // 如果数据为空，记录日志（通过 messageHandlers）
+                if (!data || data === '{}') {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
+                        window.webkit.messageHandlers.bridgeReady.postMessage('⚠️ 存档数据为空，savefile: ' + JSON.stringify(savefile));
+                    }
+                }
 
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
                     try {
@@ -206,7 +216,7 @@ struct RPGWebView: UIViewRepresentable {
                     console.warn('Native bridge not available');
                 }
 
-                return originalSave.call(this, savefile);
+                return result;
             };
 
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
