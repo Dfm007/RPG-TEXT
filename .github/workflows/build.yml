@@ -12,13 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 下载 ZIPFoundation 并复制到项目源目录（固定版本 0.9.18）
-      - name: Download ZIPFoundation (v0.9.18)
+      # 下载最新版 ZIPFoundation（main 分支）
+      - name: Download ZIPFoundation (latest)
         run: |
-          git clone --depth 1 --branch 0.9.18 https://github.com/weichsel/ZIPFoundation.git /tmp/ZIPFoundation
+          git clone --depth 1 https://github.com/weichsel/ZIPFoundation.git /tmp/ZIPFoundation
           cp -R /tmp/ZIPFoundation/Sources/ZIPFoundation/* App/Sources/AppProject/
 
-      # 2. 获取 iOS SDK 路径
+      # 获取 SDK 路径
       - name: Get SDK path
         id: sdk
         run: |
@@ -26,7 +26,7 @@ jobs:
           echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
           echo "SDKROOT=$SDK_PATH" >> $GITHUB_ENV
 
-      # 3. 编译所有 Swift 源文件
+      # 编译所有 Swift 源文件
       - name: Compile Swift sources
         run: |
           mkdir -p build
@@ -43,7 +43,7 @@ jobs:
             -parse-as-library \
             @sources.txt
 
-      # 4. 创建 .app 包结构
+      # 创建 .app 包
       - name: Create .app bundle
         run: |
           mkdir -p Payload/TEXT.app
@@ -87,12 +87,12 @@ jobs:
           </plist>
           EOF
 
-      # 5. 打包成 IPA
+      # 打包 IPA
       - name: Package IPA
         run: |
           zip -r TEXT.ipa Payload/
 
-      # 6. 上传 IPA
+      # 上传 IPA
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
