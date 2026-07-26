@@ -281,12 +281,6 @@ struct ContentView: View {
 .toolbar {
     ToolbarItem(placement: .navigationBarTrailing) {
         HStack(spacing: 16) {
-            // 设置按钮（新增）
-            Button(action: { showingSettings = true }) {
-                Image(systemName: "gear")
-                    .font(.title3)
-            }
-            
             // 原有的导入按钮
             if case .importing = importState {
                 ProgressView()
@@ -295,6 +289,11 @@ struct ContentView: View {
                 Button(action: { showImporter = true }) {
                     Image(systemName: "folder.badge.plus")
                 }
+            }
+                        // 设置按钮（新增）
+            Button(action: { showingSettings = true }) {
+                Image(systemName: "gear")
+                    .font(.title3)
             }
         }
     }
