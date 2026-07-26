@@ -110,14 +110,13 @@ class GameViewController: UIViewController {
     
 @objc private func saveTapped() {
     guard let folderURL = folderURL else { return }
-    // 通过 WebView 获取当前页面 URL
-    if let rootView = hostingController?.rootView as? RPGWebView {
-        // 由于我们通过 onWebViewCreated 捕获了 webView，这里无法直接访问
-        // 改用 Notification 或直接在 RPGWebView 中处理保存逻辑
-        // 简化方案：使用 folderURL（降级方案）
-        onSaveMarker?(folderURL, folderURL.absoluteString)
-    } else {
-        onSaveMarker?(folderURL, folderURL.absoluteString)
+    // 显示保存中的提示（可选）
+    onSaveMarker?(folderURL, folderURL.absoluteString)
+    // 显示保存成功提示
+    let alert = UIAlertController(title: nil, message: "存档保存成功", preferredStyle: .alert)
+    alert.addAction(UIAlertAction(title: "确定", style: .default))
+    DispatchQueue.main.async {
+        self.present(alert, animated: true)
     }
 }
     
