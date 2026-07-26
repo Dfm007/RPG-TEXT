@@ -23,9 +23,19 @@ struct RPGWebView: UIViewRepresentable {
         let contentController = WKUserContentController()
 
         contentController.add(context.coordinator, name: "saveGameFile")
-        contentController.add(context.coordinator, name: "loadGameFile")
         contentController.add(context.coordinator, name: "bridgeReady")
+        contentController.add(context.coordinator, name: "localStorageReport")
 
+        // 构建启动前注入 localStorage 的脚本
+        let injectScript = context.coordinator.buildLocalStorageInjectionScript()
+        let userScript = WKUserScript(
+            source: injectScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        contentController.addUserScript(userScript)
+
+        // 桥接脚本（覆盖 StorageManager.save）
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
             injectionTime: .atDocumentStart,
@@ -65,7 +75,6 @@ struct RPGWebView: UIViewRepresentable {
         let gamePath: URL
         let saveDir: URL
         private let logFileURL: URL
-        private weak var webView: WKWebView?
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -95,14 +104,41 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
+        // 构建注入 localStorage 的 JS 代码（在页面加载前执行）
+        func buildLocalStorageInjectionScript() -> String {
+            var jsCode = ""
+            guard let files = try? FileManager.default.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil) else {
+                return "console.log('无存档文件可注入');"
+            }
+            for fileURL in files where fileURL.pathExtension == "rpgsave" {
+                let fileName = fileURL.lastPathComponent
+                let numberString = fileName.replacingOccurrences(of: "file", with: "").replacingOccurrences(of: ".rpgsave", with: "")
+                if let fileId = Int(numberString) {
+                    do {
+                        let data = try String(contentsOf: fileURL, encoding: .utf8)
+                        let escaped = data.replacingOccurrences(of: "'", with: "\\'")
+                        let key = "RPG File\(fileId)"
+                        jsCode += "localStorage.setItem('\(key)', '\(escaped)');"
+                        log("✅ 准备注入: \(key) 长度 \(data.count)")
+                    } catch {
+                        log("❌ 读取文件失败: \(fileName)")
+                    }
+                }
+            }
+            if jsCode.isEmpty {
+                jsCode = "console.log('没有存档文件可注入');"
+            }
+            return jsCode
+        }
+
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             switch message.name {
             case "saveGameFile":
                 handleSave(message: message)
-            case "loadGameFile":
-                handleLoad(message: message)
             case "bridgeReady":
                 log("📨 \(message.body)")
+            case "localStorageReport":
+                log("📦 \(message.body)")
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -126,66 +162,19 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        private func handleLoad(message: WKScriptMessage) {
-            log("📥 \(message.body)")
-        }
-
-        // 同步存档到 localStorage（启动时调用）
-        private func syncArchivesToLocalStorage(webView: WKWebView) {
-            log("🔄 开始同步存档到 localStorage")
-            guard let files = try? FileManager.default.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil) else {
-                log("⚠️ 无法读取存档目录")
-                return
-            }
-            var jsScripts: [String] = []
-            for fileURL in files where fileURL.pathExtension == "rpgsave" {
-                let fileName = fileURL.lastPathComponent
-                // 提取 fileId
-                let fileIdStr = fileName.replacingOccurrences(of: "file", with: "").replacingOccurrences(of: ".rpgsave", with: "")
-                guard let fileId = Int(fileIdStr) else { continue }
-                do {
-                    let data = try String(contentsOf: fileURL, encoding: .utf8)
-                    // 转义 JSON 字符串中的单引号
-                    let escapedData = data.replacingOccurrences(of: "'", with: "\\'")
-                    let js = "localStorage.setItem('RPG File\(fileId)', '\(escapedData)');"
-                    jsScripts.append(js)
-                    log("📥 同步存档 ID \(fileId) 长度 \(data.count)")
-                } catch {
-                    log("❌ 读取存档文件失败: \(fileURL.lastPathComponent)")
-                }
-            }
-            if !jsScripts.isEmpty {
-                let combinedScript = jsScripts.joined(separator: " ")
-                webView.evaluateJavaScript(combinedScript) { _, error in
-                    if let error = error {
-                        self.log("❌ 同步存档到 localStorage 失败: \(error)")
-                    } else {
-                        self.log("✅ 同步存档到 localStorage 成功")
-                    }
-                }
-            } else {
-                log("⚠️ 没有找到存档文件")
-            }
-        }
-
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            self.webView = webView
             log("🌐 页面加载完成")
-
-            // 重新注入桥接（确保覆盖）
-            let script = RPGWebView.bridgeJavaScript()
-            webView.evaluateJavaScript(script) { _, error in
-                if let error = error {
-                    self.log("❌ 重新注入失败: \(error)")
-                } else {
-                    self.log("✅ 重新注入成功")
+            // 可以再次检查 localStorage 状态
+            let checkScript = """
+            (function() {
+                var keys = Object.keys(localStorage);
+                var report = '页面加载后 localStorage keys: ' + keys.join(', ');
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.localStorageReport) {
+                    window.webkit.messageHandlers.localStorageReport.postMessage(report);
                 }
-            }
-
-            // 延迟同步存档（等待游戏完全初始化）
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                self.syncArchivesToLocalStorage(webView: webView)
-            }
+            })();
+            """
+            webView.evaluateJavaScript(checkScript, completionHandler: nil)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -197,7 +186,7 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - Static JavaScript
+    // MARK: - Static JavaScript (仅覆盖 save)
     private static func bridgeJavaScript() -> String {
         return """
         (function() {
@@ -207,14 +196,10 @@ struct RPGWebView: UIViewRepresentable {
 
             if (typeof StorageManager === 'undefined') {
                 console.warn('StorageManager not found');
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                    window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager 未定义');
-                }
                 return;
             }
 
             var originalSave = StorageManager.save;
-
             StorageManager.save = function(savefile) {
                 var result = originalSave.call(this, savefile);
                 var fileId = savefile.savefileId || 1;
@@ -239,12 +224,10 @@ struct RPGWebView: UIViewRepresentable {
                 return result;
             };
 
-            // 保持 load 原始不变，游戏从 localStorage 读取
-
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
                 window.webkit.messageHandlers.bridgeReady.postMessage('✅ StorageManager.save 已覆盖');
             }
-            console.log('✅ 桥接注入完成（仅保存拦截）');
+            console.log('✅ 桥接注入完成');
         })();
         """
     }
