@@ -3,11 +3,12 @@ import WebKit
 
 struct RPGWebView: UIViewRepresentable {
     let folderURL: URL
-    // 新增：暴露 webView 的回调
+    var configuration: WKWebViewConfiguration? = nil  // 可选自定义配置
     var onWebViewCreated: ((WKWebView) -> Void)?
     
     func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
+        let config = configuration ?? WKWebViewConfiguration()
+        // 基础设置（保留）
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
         
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -17,9 +18,7 @@ struct RPGWebView: UIViewRepresentable {
         webView.scrollView.backgroundColor = .black
         webView.isOpaque = false
         
-        // 暴露 webView
         onWebViewCreated?(webView)
-        
         return webView
     }
     
