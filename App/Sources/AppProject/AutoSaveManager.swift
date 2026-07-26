@@ -11,9 +11,7 @@ class AutoSaveManager: ObservableObject {
     // MARK: - 保存游戏状态（手动调用）
     
     func saveGameState(for gameId: UUID, webView: WKWebView, completion: ((Bool, String?) -> Void)? = nil) {
-        // ⭐ 确保在主线程执行
         DispatchQueue.main.async {
-            // 1. 获取当前 URL
             webView.evaluateJavaScript("window.location.href") { [weak self] result, error in
                 guard let self = self else { return }
                 
@@ -33,12 +31,10 @@ class AutoSaveManager: ObservableObject {
                     return
                 }
                 
-                // 保存 URL 和时间戳
                 self.userDefaults.set(url, forKey: self.saveKeyPrefix + gameId.uuidString)
                 self.userDefaults.set(Date(), forKey: self.timestampKeyPrefix + gameId.uuidString)
                 print("✅ URL 已保存: \(url)")
                 
-                // 2. 尝试调用 RPG Maker 的 StorageManager.save()
                 webView.evaluateJavaScript("""
                     (function() {
                         if (typeof StorageManager !== 'undefined' && StorageManager.save) {
@@ -62,7 +58,19 @@ class AutoSaveManager: ObservableObject {
         }
     }
     
+    // MARK: - 获取某游戏的所有存档（目前仅返回最后一个）
+    
+    func getArchives(for gameId: UUID) -> [(url: String, timestamp: Date)] {
+        let key = saveKeyPrefix + gameId.uuidString
+        guard let url = userDefaults.string(forKey: key),
+              let timestamp = userDefaults.object(forKey: timestampKeyPrefix + gameId.uuidString) as? Date else {
+            return []
+        }
+        return [(url: url, timestamp: timestamp)]
+    }
+    
     // MARK: - 恢复游戏状态
+    
     func restoreGameState(for gameId: UUID, webView: WKWebView, completion: ((Bool, String?) -> Void)? = nil) {
         let key = saveKeyPrefix + gameId.uuidString
         guard let savedURL = userDefaults.string(forKey: key) else {
@@ -91,6 +99,7 @@ class AutoSaveManager: ObservableObject {
     }
     
     // MARK: - 获取保存信息
+    
     func getSavedInfo(for gameId: UUID) -> (url: String?, timestamp: Date?) {
         let url = userDefaults.string(forKey: saveKeyPrefix + gameId.uuidString)
         let timestamp = userDefaults.object(forKey: timestampKeyPrefix + gameId.uuidString) as? Date
@@ -102,6 +111,7 @@ class AutoSaveManager: ObservableObject {
     }
     
     // MARK: - 清除存档
+    
     func clearSaveState(for gameId: UUID) {
         userDefaults.removeObject(forKey: saveKeyPrefix + gameId.uuidString)
         userDefaults.removeObject(forKey: timestampKeyPrefix + gameId.uuidString)
@@ -109,6 +119,7 @@ class AutoSaveManager: ObservableObject {
     }
     
     // MARK: - 格式化保存时间
+    
     func formattedSaveTime(for gameId: UUID) -> String? {
         let (_, timestamp) = getSavedInfo(for: gameId)
         guard let timestamp = timestamp else { return nil }
