@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import PhotosUI
+import UniformTypeIdentifiers
 
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
@@ -165,6 +166,9 @@ struct ContentView: View {
     
     @State private var refreshID = UUID()
     
+    // ⭐ 存档管理器导航
+    @State private var archiveManagerGame: GameItem?
+    
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
     
@@ -182,6 +186,18 @@ struct ContentView: View {
                             GameOverlayManager.shared.hideGame()
                         }
                         .ignoresSafeArea()
+                } else if let game = archiveManagerGame {
+                    // ⭐ 存档管理器视图
+                    ArchiveManagerView(game: game, gameURL: getLocalGameURL(for: game))
+                        .navigationTitle("\(game.name) - 存档")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarLeading) {
+                                Button("返回") {
+                                    archiveManagerGame = nil
+                                }
+                            }
+                        }
                 } else {
                     VStack {
                         if games.isEmpty {
@@ -228,6 +244,16 @@ struct ContentView: View {
                                         }
                                         
                                         Spacer()
+                                        
+                                        // ⭐ 存档管理按钮（文件夹图标）
+                                        Button {
+                                            archiveManagerGame = game
+                                        } label: {
+                                            Image(systemName: "folder")
+                                                .font(.title3)
+                                                .foregroundColor(.blue)
+                                        }
+                                        .buttonStyle(.plain)
                                         
                                         Button {
                                             menuGameId = game.id
@@ -422,7 +448,7 @@ struct ContentView: View {
         }
     }
     
-    // MARK: - ⭐ 核心：导入并解压 .zip / .apk
+    // MARK: - 导入并解压 .zip / .apk
     
     private func importGameArchive(from sourceURL: URL) {
         importState = .importing
@@ -439,7 +465,6 @@ struct ContentView: View {
         let archiveName = sourceURL.lastPathComponent
         let gameName = (archiveName as NSString).deletingPathExtension
         
-        // 检查是否已存在同名游戏
         if games.contains(where: { $0.name == gameName }) {
             importError = "已存在同名游戏「\(gameName)」，请先删除再导入"
             showErrorAlert = true
@@ -455,7 +480,6 @@ struct ContentView: View {
         
         Task {
             do {
-                // 获取安全访问权限
                 let didStartAccessing = sourceURL.startAccessingSecurityScopedResource()
                 defer {
                     if didStartAccessing {
@@ -463,7 +487,6 @@ struct ContentView: View {
                     }
                 }
                 
-                // 复制到临时目录
                 let tempDir = fileManager.temporaryDirectory
                 let tempFile = tempDir.appendingPathComponent(archiveName)
                 if fileManager.fileExists(atPath: tempFile.path) {
@@ -472,10 +495,8 @@ struct ContentView: View {
                 try fileManager.copyItem(at: sourceURL, to: tempFile)
                 writeLog("已复制到临时目录：\(tempFile.path)")
                 
-                // 创建解压目标目录
                 try fileManager.createDirectory(at: destURL, withIntermediateDirectories: true)
                 
-                // ⭐ 解压（使用 Progress 对象，适配最新 API）
                 let progress = Progress(totalUnitCount: 0)
                 let observation = progress.observe(\.fractionCompleted) { prog, _ in
                     DispatchQueue.main.async {
@@ -486,20 +507,15 @@ struct ContentView: View {
                 observation.invalidate()
                 writeLog("解压完成，目标目录：\(destURL.path)")
                 
-                // 删除临时文件
                 try? fileManager.removeItem(at: tempFile)
                 
-                // 验证并扁平化目录
                 let finalGameURL = try await findAndFlattenGameDirectory(at: destURL)
                 writeLog("最终游戏目录：\(finalGameURL.path)")
                 
-                // 检查是否存在 index.html
                 let indexURL = finalGameURL.appendingPathComponent("index.html")
                 if !fileManager.fileExists(atPath: indexURL.path) {
-                    // 尝试递归搜索
                     if let found = findIndexHTML(in: finalGameURL) {
                         writeLog("在子目录中找到 index.html：\(found.path)")
-                        // 将找到的目录内容移动到上级
                         let parent = found.deletingLastPathComponent()
                         let contents = try fileManager.contentsOfDirectory(atPath: found.path)
                         for item in contents {
@@ -508,7 +524,6 @@ struct ContentView: View {
                             try fileManager.moveItem(at: src, to: dst)
                         }
                         try fileManager.removeItem(at: found)
-                        // 重新检查
                         if fileManager.fileExists(atPath: parent.appendingPathComponent("index.html").path) {
                             writeLog("index.html 已移动到根目录")
                         } else {
@@ -519,7 +534,6 @@ struct ContentView: View {
                     }
                 }
                 
-                // 验证通过，添加到游戏库
                 let relativePath = finalGameURL.lastPathComponent
                 let newGame = GameItem(name: gameName, localPath: relativePath, lastPlayed: nil)
                 
@@ -532,7 +546,6 @@ struct ContentView: View {
                 }
                 
             } catch {
-                // 清理残留文件
                 try? fileManager.removeItem(at: destURL)
                 await MainActor.run {
                     importError = "导入失败：\(error.localizedDescription)"
@@ -559,17 +572,15 @@ struct ContentView: View {
         return nil
     }
     
-    // MARK: - 扁平化目录（处理嵌套）
+    // MARK: - 扁平化目录
     
     private func findAndFlattenGameDirectory(at url: URL) async throws -> URL {
         let contents = try fileManager.contentsOfDirectory(atPath: url.path)
         
-        // 如果根目录有 index.html，直接返回
         if contents.contains("index.html") {
             return url
         }
         
-        // 只有一个子文件夹且内部有 index.html
         if contents.count == 1 {
             let subPath = url.appendingPathComponent(contents[0])
             var isDir: ObjCBool = false
@@ -577,7 +588,6 @@ struct ContentView: View {
                isDir.boolValue {
                 let subContents = try fileManager.contentsOfDirectory(atPath: subPath.path)
                 if subContents.contains("index.html") {
-                    // 移动所有内容到上层
                     for item in subContents {
                         let src = subPath.appendingPathComponent(item)
                         let dst = url.appendingPathComponent(item)
@@ -589,7 +599,6 @@ struct ContentView: View {
             }
         }
         
-        // 遍历所有子目录，查找包含 index.html 的
         for item in contents {
             let subPath = url.appendingPathComponent(item)
             var isDir: ObjCBool = false
@@ -597,7 +606,6 @@ struct ContentView: View {
                isDir.boolValue {
                 if let found = findIndexHTML(in: subPath) {
                     let parent = found.deletingLastPathComponent()
-                    // 将 parent 内的所有内容移动到 url
                     let moveContents = try fileManager.contentsOfDirectory(atPath: parent.path)
                     for moveItem in moveContents {
                         let src = parent.appendingPathComponent(moveItem)
@@ -610,7 +618,6 @@ struct ContentView: View {
             }
         }
         
-        // 还是没找到，返回原路径（后续会因验证失败而报错）
         return url
     }
     
@@ -626,10 +633,8 @@ struct ContentView: View {
             }
             let fileURL = iconDir.appendingPathComponent("icon.png")
             try data.write(to: fileURL)
-            print("✅ 图标保存成功：\(fileURL.path)")
             refreshID = UUID()
         } catch {
-            print("❌ 保存图标失败：\(error)")
             importError = "保存图标失败：\(error.localizedDescription)"
             showErrorAlert = true
         }
@@ -643,7 +648,7 @@ struct ContentView: View {
         }
     }
     
-    // MARK: - 删除游戏（单个）
+    // MARK: - 删除游戏
     private func deleteGame(at index: Int) {
         let game = games[index]
         let gameURL = getLocalGameURL(for: game)
@@ -659,7 +664,6 @@ struct ContentView: View {
         refreshID = UUID()
     }
     
-    // MARK: - 删除游戏（批量）
     private func deleteGames(at offsets: IndexSet) {
         for index in offsets.sorted(by: >) {
             deleteGame(at: index)
@@ -678,6 +682,211 @@ struct ContentView: View {
         if let decoded = try? JSONDecoder().decode([GameItem].self, from: data) {
             games = decoded
         }
+    }
+}
+
+// MARK: - ⭐ 存档管理器视图
+struct ArchiveManagerView: View {
+    let game: GameItem
+    let gameURL: URL
+    
+    @State private var archiveFiles: [ArchiveFile] = []
+    @State private var showImportPicker = false
+    @State private var importError: String?
+    @State private var showErrorAlert = false
+    @State private var refreshID = UUID()
+    
+    private let fileManager = FileManager.default
+    private let archiveExtensions = ["rpgsave", "rvdata2", "rxdata", "sav", "save", "dat"]
+    
+    struct ArchiveFile: Identifiable {
+        let id = UUID()
+        let url: URL
+        let name: String
+        let size: Int64
+        let modificationDate: Date
+        
+        var sizeFormatted: String {
+            let formatter = ByteCountFormatter()
+            formatter.countStyle = .file
+            return formatter.string(fromByteCount: size)
+        }
+        
+        var dateFormatted: String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            return formatter.string(from: modificationDate)
+        }
+    }
+    
+    var body: some View {
+        List {
+            if archiveFiles.isEmpty {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 16) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 44))
+                            .foregroundColor(.gray)
+                        Text("暂无存档文件")
+                            .font(.headline)
+                            .foregroundColor(.gray)
+                        Text("点击右上角「导入」添加存档")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 40)
+                    Spacer()
+                }
+            } else {
+                ForEach(archiveFiles) { file in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(file.name)
+                                .font(.headline)
+                            HStack(spacing: 16) {
+                                Text(file.sizeFormatted)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(file.dateFormatted)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        Spacer()
+                    }
+                }
+                .onDelete(perform: deleteArchives)
+            }
+        }
+        .listStyle(.plain)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(action: { showImportPicker = true }) {
+                    Image(systemName: "square.and.arrow.down")
+                }
+            }
+        }
+        .fileImporter(
+            isPresented: $showImportPicker,
+            allowedContentTypes: [.data, .item],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let selectedURL = urls.first else { return }
+                importArchive(from: selectedURL)
+            case .failure(let error):
+                importError = "选择文件失败: \(error.localizedDescription)"
+                showErrorAlert = true
+            }
+        }
+        .alert("导入错误", isPresented: $showErrorAlert, presenting: importError) { _ in
+            Button("确定") { }
+        } message: { error in
+            Text(error)
+        }
+        .onAppear {
+            scanArchives()
+        }
+        .id(refreshID)
+    }
+    
+    // MARK: - 扫描存档文件
+    
+    private func scanArchives() {
+        archiveFiles.removeAll()
+        
+        guard let enumerator = fileManager.enumerator(at: gameURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+            return
+        }
+        
+        for case let fileURL as URL in enumerator {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue else { continue }
+            
+            let ext = fileURL.pathExtension.lowercased()
+            if archiveExtensions.contains(ext) {
+                do {
+                    let attrs = try fileManager.attributesOfItem(atPath: fileURL.path)
+                    let size = attrs[.size] as? Int64 ?? 0
+                    let modDate = attrs[.modificationDate] as? Date ?? Date()
+                    let file = ArchiveFile(
+                        url: fileURL,
+                        name: fileURL.lastPathComponent,
+                        size: size,
+                        modificationDate: modDate
+                    )
+                    archiveFiles.append(file)
+                } catch {
+                    print("读取文件属性失败: \(error)")
+                }
+            }
+        }
+        
+        // 按修改时间排序（最新的在前）
+        archiveFiles.sort { $0.modificationDate > $1.modificationDate }
+    }
+    
+    // MARK: - 导入存档
+    
+    private func importArchive(from sourceURL: URL) {
+        let didStartAccessing = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+        
+        let fileName = sourceURL.lastPathComponent
+        
+        // 确定存档目录：优先使用 save/ 目录
+        let saveDir = gameURL.appendingPathComponent("save")
+        let targetDir: URL
+        if fileManager.fileExists(atPath: saveDir.path) {
+            targetDir = saveDir
+        } else {
+            targetDir = gameURL
+        }
+        
+        let targetURL = targetDir.appendingPathComponent(fileName)
+        
+        // 如果同名文件已存在，添加时间戳后缀
+        let finalURL: URL
+        if fileManager.fileExists(atPath: targetURL.path) {
+            let timestamp = Int(Date().timeIntervalSince1970)
+            let nameWithoutExt = (fileName as NSString).deletingPathExtension
+            let ext = (fileName as NSString).pathExtension
+            let newName = "\(nameWithoutExt)_\(timestamp).\(ext)"
+            finalURL = targetDir.appendingPathComponent(newName)
+        } else {
+            finalURL = targetURL
+        }
+        
+        do {
+            try fileManager.copyItem(at: sourceURL, to: finalURL)
+            scanArchives()
+            refreshID = UUID()
+        } catch {
+            importError = "导入失败: \(error.localizedDescription)"
+            showErrorAlert = true
+        }
+    }
+    
+    // MARK: - 删除存档
+    
+    private func deleteArchives(at offsets: IndexSet) {
+        for index in offsets {
+            let file = archiveFiles[index]
+            do {
+                try fileManager.removeItem(at: file.url)
+            } catch {
+                print("删除失败: \(error)")
+            }
+        }
+        scanArchives()
+        refreshID = UUID()
     }
 }
 
@@ -723,9 +932,7 @@ struct ImagePicker: UIViewControllerRepresentable {
     }
 }
 
-// ⭐ 扩展 UTType 支持 .apk 和 .zip
-import UniformTypeIdentifiers
-
+// ⭐ 扩展 UTType
 extension UTType {
     static var apk: UTType {
         UTType(importedAs: "application/vnd.android.package-archive")
