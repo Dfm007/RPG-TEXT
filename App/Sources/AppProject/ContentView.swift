@@ -721,45 +721,49 @@ struct ArchiveManagerView: View {
     
     var body: some View {
         List {
-            if archiveFiles.isEmpty {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 16) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 44))
-                            .foregroundColor(.gray)
-                        Text("暂无存档文件")
-                            .font(.headline)
-                            .foregroundColor(.gray)
-                        Text("点击右上角「导入」添加存档")
+    if archiveFiles.isEmpty {
+        HStack {
+            Spacer()
+            VStack(spacing: 16) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 44))
+                    .foregroundColor(.gray)
+                Text("暂无存档文件")
+                    .font(.headline)
+                    .foregroundColor(.gray)
+                Text("点击右上角「导入」添加存档")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 40)
+            Spacer()
+        }
+    } else {
+        ForEach(archiveFiles) { file in
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(file.name)
+                        .font(.headline)
+                    HStack(spacing: 16) {
+                        Text(file.sizeFormatted)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(file.dateFormatted)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    .padding(.vertical, 40)
-                    Spacer()
                 }
-            } else {
-                ForEach(archiveFiles) { file in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(file.name)
-                                .font(.headline)
-                            HStack(spacing: 16) {
-                                Text(file.sizeFormatted)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text(file.dateFormatted)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        Spacer()
-                    }
-                }
-                .onDelete(perform: deleteArchives)
+                Spacer()
             }
         }
-        .listStyle(.plain)
+        .onDelete(perform: deleteArchives)
+    }
+}
+.listStyle(.plain)
+.refreshable {
+    scanArchives()
+    refreshID = UUID()
+}
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 HStack(spacing: 16) {
