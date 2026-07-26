@@ -6,12 +6,14 @@ struct RPGWebView: UIViewRepresentable {
     @Binding var isLoading: Bool
     let onWebViewCreated: ((WKWebView) -> Void)?
 
+    // 主要初始化（保留）
     init(gamePath: URL, isLoading: Binding<Bool> = .constant(false), onWebViewCreated: ((WKWebView) -> Void)? = nil) {
         self.gamePath = gamePath
         self._isLoading = isLoading
         self.onWebViewCreated = onWebViewCreated
     }
 
+    // 专门匹配 GameViewController 中的调用（folderURL: + 尾随闭包）
     init(folderURL: URL, onWebViewCreated: ((WKWebView) -> Void)? = nil) {
         self.gamePath = folderURL
         self._isLoading = .constant(false)
@@ -22,14 +24,13 @@ struct RPGWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
 
-        // 注册所有消息处理器
         contentController.add(context.coordinator, name: "saveGameFile")
         contentController.add(context.coordinator, name: "loadGameFile")
         contentController.add(context.coordinator, name: "bridgeReady")
 
-        // 注入初始桥接（页面加载前）
+        // 注入桥接 JS（页面加载前）
         let bridgeScript = WKUserScript(
-            source: getBridgeJavaScript(),
+            source: bridgeJavaScript(),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         )
@@ -44,11 +45,12 @@ struct RPGWebView: UIViewRepresentable {
         let indexURL = gamePath.appendingPathComponent("index.html")
         if FileManager.default.fileExists(atPath: indexURL.path) {
             webView.loadFileURL(indexURL, allowingReadAccessTo: gamePath)
-            context.coordinator.log("✅ 加载 index.html: \(indexURL.path)")
+            context.coordinator.log("✅ 加载 index.html")
         } else {
-            context.coordinator.log("❌ 未找到 index.html")
+            context.coordinator.log("❌ index.html 不存在")
         }
 
+        // 回调 webView 实例
         DispatchQueue.main.async {
             self.onWebViewCreated?(webView)
         }
@@ -101,7 +103,7 @@ struct RPGWebView: UIViewRepresentable {
             case "saveGameFile":
                 handleSave(message: message)
             case "loadGameFile":
-                handleLoad(message: message)
+                break // 暂不实现
             case "bridgeReady":
                 log("📨 Bridge 状态: \(message.body)")
             default:
@@ -127,40 +129,38 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        private func handleLoad(message: WKScriptMessage) {
-            // 预留
-        }
-
+        // MARK: - WKNavigationDelegate
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             log("🌐 页面加载完成")
-            // 关键：再次注入桥接，确保覆盖（可能游戏脚本晚于我们的注入加载）
-            let reinjectScript = getBridgeJavaScript()
-            webView.evaluateJavaScript(reinjectScript) { _, error in
+
+            // 重新注入桥接（应对游戏脚本晚加载）
+            let script = bridgeJavaScript()
+            webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
                     self.log("❌ 重新注入失败: \(error)")
                 } else {
-                    self.log("✅ 重新注入桥接成功")
+                    self.log("✅ 重新注入成功")
                 }
             }
 
-            // 延迟1秒再次确认（有些游戏脚本加载更晚）
+            // 延迟1秒再注入一次
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                webView.evaluateJavaScript(reinjectScript) { _, error in
+                webView.evaluateJavaScript(script) { _, error in
                     if let error = error {
                         self.log("❌ 延迟注入失败: \(error)")
                     } else {
-                        self.log("✅ 延迟注入桥接成功")
+                        self.log("✅ 延迟注入成功")
                     }
                 }
-                // 发送检测脚本，确认 StorageManager.save 是否已覆盖
+                // 检查 StorageManager 状态
                 let checkScript = """
                 (function() {
-                    var status = '未覆盖';
-                    if (typeof StorageManager !== 'undefined' && StorageManager.save) {
-                        status = '已覆盖';
+                    var status = '未定义';
+                    if (typeof StorageManager !== 'undefined') {
+                        status = '已定义，save方法' + (StorageManager.save ? '已覆盖' : '未覆盖');
                     }
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                        window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager 状态: ' + status);
+                        window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager: ' + status);
                     }
                 })();
                 """
@@ -177,29 +177,23 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - 桥接 JavaScript
-    private func getBridgeJavaScript() -> String {
+    // MARK: - JavaScript 桥接代码
+    private func bridgeJavaScript() -> String {
         return """
         (function() {
-            // 通知 Native 脚本执行
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
                 window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始');
             }
 
             if (typeof StorageManager === 'undefined') {
-                console.warn('StorageManager not found, bridge may not work.');
+                console.warn('StorageManager not found');
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
                     window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager 未定义');
                 }
-                // 即使 StorageManager 未定义，也尝试保存原始引用（如果以后定义）
-                // 但我们没法重写，只能等待再次注入。
                 return;
             }
 
-            // 保存原始方法
             var originalSave = StorageManager.save;
-
-            // 重写 save
             StorageManager.save = function(savefile) {
                 var fileId = savefile.savefileId || 1;
                 var fileName = 'file' + fileId + '.rpgsave';
@@ -219,15 +213,13 @@ struct RPGWebView: UIViewRepresentable {
                     console.warn('Native bridge not available');
                 }
 
-                // 仍然调用原始方法
                 return originalSave.call(this, savefile);
             };
 
-            // 通知 Native 桥接成功
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
                 window.webkit.messageHandlers.bridgeReady.postMessage('✅ StorageManager.save 已覆盖');
             }
-            console.log('✅ RPG Maker 文件桥接已注入');
+            console.log('✅ 桥接注入完成');
         })();
         """
     }
