@@ -111,17 +111,12 @@ class GameViewController: UIViewController {
 @objc private func saveTapped() {
     guard let folderURL = folderURL else { return }
     // 通过 WebView 获取当前页面 URL
-    if let webView = hostingController?.rootView.webView {
-        webView.evaluateJavaScript("window.location.href") { [weak self] result, error in
-            if let urlString = result as? String, !urlString.isEmpty {
-                self?.onSaveMarker?(folderURL, urlString)
-            } else {
-                // 降级：使用 folderURL
-                self?.onSaveMarker?(folderURL, folderURL.absoluteString)
-            }
-        }
+    if let rootView = hostingController?.rootView as? RPGWebView {
+        // 由于我们通过 onWebViewCreated 捕获了 webView，这里无法直接访问
+        // 改用 Notification 或直接在 RPGWebView 中处理保存逻辑
+        // 简化方案：使用 folderURL（降级方案）
+        onSaveMarker?(folderURL, folderURL.absoluteString)
     } else {
-        // 降级：使用 folderURL
         onSaveMarker?(folderURL, folderURL.absoluteString)
     }
 }
