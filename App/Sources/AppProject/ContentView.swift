@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import PhotosUI
 import UniformTypeIdentifiers
+import WebKit
 
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
