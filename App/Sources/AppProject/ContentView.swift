@@ -22,12 +22,11 @@ enum ImportState {
     case failed(String)
 }
 
-// MARK: 强制横屏的 UIViewController
+// MARK: - 强制横屏的 UIViewController
 class GameViewController: UIViewController {
     var folderURL: URL?
     var onExit: (() -> Void)?
     var gameId: UUID?
-    var loadURL: String?          // 用于加载特定存档URL
     
     private var hostingController: UIHostingController<RPGWebView>?
     private var gearButton: UIButton!
@@ -70,33 +69,16 @@ class GameViewController: UIViewController {
             gearButton.heightAnchor.constraint(equalToConstant: 40)
         ])
         gearButton.addTarget(self, action: #selector(gearButtonTapped), for: .touchUpInside)
-        
-        // ⭐ 注册应用回到前台通知（恢复音频）
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAppDidBecomeActive),
-            name: UIApplication.didBecomeActiveNotification,
-            object: nil
-        )
-    }
-    
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        // 如果存在 loadURL，则加载该 URL（用于读存档）
-        if let loadURL = loadURL, let url = URL(string: loadURL), let webView = webViewRef {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                webView.load(URLRequest(url: url))
-                print("🔄 已加载存档 URL: \(loadURL)")
-            }
-        }
     }
     
     @objc private func gearButtonTapped() {
         let alertController = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
         
+        // 保存游戏：将游戏目录中的存档复制到 GameSaves
         let saveAction = UIAlertAction(title: "保存游戏", style: .default) { [weak self] _ in
             self?.saveGame()
         }
+        // 返回主界面
         let exitAction = UIAlertAction(title: "返回主界面", style: .destructive) { [weak self] _ in
             self?.onExit?()
         }
@@ -116,55 +98,41 @@ class GameViewController: UIViewController {
     
     @objc private func saveGame() {
         guard let gameId = gameId,
-              let webView = webViewRef else {
+              let folderURL = folderURL else {
             let alert = UIAlertController(title: "保存失败", message: "无法获取游戏信息", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "确定", style: .default))
             present(alert, animated: true)
             return
         }
         
-        let loadingAlert = UIAlertController(title: nil, message: "正在保存...", preferredStyle: .alert)
-        present(loadingAlert, animated: true)
+        // 扫描游戏目录下的 save 文件夹，将所有 .rpgsave 文件复制到 GameSaves
+        let saveDir = folderURL.appendingPathComponent("save")
+        guard let enumerator = FileManager.default.enumerator(at: saveDir, includingPropertiesForKeys: nil) else {
+            let alert = UIAlertController(title: "保存失败", message: "未找到存档文件夹", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "确定", style: .default))
+            present(alert, animated: true)
+            return
+        }
         
-        AutoSaveManager.shared.saveGameState(for: gameId, webView: webView) { [weak self] success, message in
-            DispatchQueue.main.async {
-                loadingAlert.dismiss(animated: true) {
-                    let resultAlert = UIAlertController(
-                        title: success ? "✅ 保存成功" : "❌ 保存失败",
-                        message: message ?? (success ? "游戏已保存" : "未知错误"),
-                        preferredStyle: .alert
-                    )
-                    resultAlert.addAction(UIAlertAction(title: "确定", style: .default))
-                    self?.present(resultAlert, animated: true)
+        var savedCount = 0
+        for case let fileURL as URL in enumerator {
+            let fileName = fileURL.lastPathComponent
+            if fileName.hasSuffix(".rpgsave") || fileName.hasSuffix(".rvdata2") {
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    if SaveFileManager.shared.writeSave(gameId: gameId, fileName: fileName, data: data) {
+                        savedCount += 1
+                    }
+                } catch {
+                    print("❌ 读取存档失败: \(error)")
                 }
             }
         }
-    }
-    
-    // ⭐ 应用回到前台时恢复音频
-    @objc private func handleAppDidBecomeActive() {
-        guard let webView = webViewRef else { return }
-        let script = """
-            (function() {
-                if (typeof AudioContext !== 'undefined') {
-                    try { new AudioContext().resume(); } catch(e) {}
-                }
-                if (typeof WebAudio !== 'undefined' && WebAudio._context) {
-                    try { WebAudio._context.resume(); } catch(e) {}
-                }
-                if (typeof AudioManager !== 'undefined' && AudioManager.resume) {
-                    AudioManager.resume();
-                }
-                return '音频恢复尝试';
-            })();
-        """
-        webView.evaluateJavaScript(script) { _, error in
-            if let error = error {
-                print("❌ 音频恢复失败: \(error.localizedDescription)")
-            } else {
-                print("✅ 音频恢复脚本已执行")
-            }
-        }
+        
+        let message = savedCount > 0 ? "已保存 \(savedCount) 个存档文件" : "没有找到可保存的存档"
+        let alert = UIAlertController(title: savedCount > 0 ? "✅ 保存成功" : "⚠️ 保存失败", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default))
+        present(alert, animated: true)
     }
     
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
@@ -178,7 +146,6 @@ class GameViewController: UIViewController {
     }
     
     deinit {
-        NotificationCenter.default.removeObserver(self)
         hostingController?.willMove(toParent: nil)
         hostingController?.view.removeFromSuperview()
         hostingController?.removeFromParent()
@@ -208,8 +175,8 @@ class GameOverlayManager {
     private var gameWindow: UIWindow?
     private var gameVC: GameViewController?
     
-    func showGame(folderURL: URL, gameId: UUID, loadURL: String? = nil, onExit: @escaping () -> Void) {
-        // 1️⃣ 锁定横屏
+    func showGame(folderURL: URL, gameId: UUID, onExit: @escaping () -> Void) {
+        // 锁定横屏
         AppDelegate.orientationLock = .landscape
         UIViewController.attemptRotationToDeviceOrientation()
         
@@ -224,7 +191,6 @@ class GameOverlayManager {
         let vc = GameViewController()
         vc.folderURL = folderURL
         vc.gameId = gameId
-        vc.loadURL = loadURL
         vc.onExit = { [weak self] in
             self?.hideGame()
             onExit()
@@ -232,7 +198,7 @@ class GameOverlayManager {
         window.rootViewController = vc
         window.makeKeyAndVisible()
         
-        // 2️⃣ 强制横屏
+        // 强制横屏
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
         
@@ -245,7 +211,7 @@ class GameOverlayManager {
         gameWindow = nil
         gameVC = nil
         
-        // 3️⃣ 恢复竖屏
+        // 恢复竖屏
         AppDelegate.orientationLock = .portrait
         UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
@@ -281,7 +247,7 @@ struct ContentView: View {
     // 读存档相关
     @State private var showArchiveList = false
     @State private var archiveGameId: UUID?
-    @State private var archiveURLs: [(url: String, timestamp: Date)] = []
+    @State private var archiveFiles: [(fileName: String, fileSize: Int64, modificationDate: Date)] = []
 
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
@@ -292,11 +258,9 @@ struct ContentView: View {
                 if let game = selectedGame {
                     Color.clear
                         .onAppear {
-                            // 普通启动（不带存档）
                             GameOverlayManager.shared.showGame(
                                 folderURL: getLocalGameURL(for: game),
                                 gameId: game.id,
-                                loadURL: nil,
                                 onExit: {
                                     selectedGame = nil
                                 }
@@ -356,8 +320,8 @@ struct ContentView: View {
                                         // 读存档按钮
                                         Button {
                                             archiveGameId = game.id
-                                            archiveURLs = AutoSaveManager.shared.getArchives(for: game.id)
-                                            if archiveURLs.isEmpty {
+                                            archiveFiles = SaveFileManager.shared.listSaves(gameId: game.id)
+                                            if archiveFiles.isEmpty {
                                                 importError = "没有找到存档，请先保存游戏"
                                                 showErrorAlert = true
                                             } else {
@@ -509,22 +473,27 @@ struct ContentView: View {
             Button("取消", role: .cancel) { }
         }
         .confirmationDialog("选择存档", isPresented: $showArchiveList, titleVisibility: .visible) {
-            ForEach(archiveURLs.indices, id: \.self) { index in
-                let item = archiveURLs[index]
-                let timeString = DateFormatter.localizedString(from: item.timestamp, dateStyle: .short, timeStyle: .short)
-                Button("存档 \(timeString)") {
+            ForEach(archiveFiles.indices, id: \.self) { index in
+                let file = archiveFiles[index]
+                let timeString = DateFormatter.localizedString(from: file.modificationDate, dateStyle: .short, timeStyle: .short)
+                let sizeString = SaveFileManager.shared.formattedFileSize(file.fileSize)
+                Button("\(file.fileName) (\(sizeString) \(timeString))") {
                     guard let gameId = archiveGameId,
                           let game = games.first(where: { $0.id == gameId }) else { return }
-                    // 直接启动游戏并加载存档
-                    GameOverlayManager.shared.showGame(
-                        folderURL: getLocalGameURL(for: game),
-                        gameId: game.id,
-                        loadURL: item.url,
-                        onExit: {
-                            // 退出时不做额外操作
-                        }
-                    )
-                    updateLastPlayed(for: game.id)
+                    // 将存档复制到游戏目录
+                    let gameURL = getLocalGameURL(for: game)
+                    if SaveFileManager.shared.copySaveToGame(gameId: gameId, fileName: file.fileName, gameFolderURL: gameURL) {
+                        // 复制成功，启动游戏
+                        GameOverlayManager.shared.showGame(
+                            folderURL: gameURL,
+                            gameId: gameId,
+                            onExit: { }
+                        )
+                        updateLastPlayed(for: game.id)
+                    } else {
+                        importError = "复制存档失败"
+                        showErrorAlert = true
+                    }
                 }
             }
             Button("取消", role: .cancel) { }
@@ -594,7 +563,6 @@ struct ContentView: View {
     }
     
     // MARK: - 导入并解压 .zip / .apk
-    
     private func importGameArchive(from sourceURL: URL) {
         importState = .importing
         writeLog("开始导入文件：\(sourceURL.lastPathComponent)")
@@ -703,7 +671,6 @@ struct ContentView: View {
     }
     
     // MARK: - 递归查找 index.html
-    
     private func findIndexHTML(in directory: URL) -> URL? {
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: nil) else {
@@ -718,7 +685,6 @@ struct ContentView: View {
     }
     
     // MARK: - 扁平化目录
-    
     private func findAndFlattenGameDirectory(at url: URL) async throws -> URL {
         let contents = try fileManager.contentsOfDirectory(atPath: url.path)
         
