@@ -792,42 +792,53 @@ struct ArchiveManagerView: View {
         .id(refreshID)
     }
     
-    // MARK: - 扫描存档文件
+// MARK: - 扫描存档文件（递归扫描所有子目录）
+private func scanArchives() {
+    archiveFiles.removeAll()
     
-    private func scanArchives() {
-        archiveFiles.removeAll()
+    // 支持的存档扩展名（增加更多常见格式）
+    let archiveExtensions = [
+        "rpgsave", "rvdata2", "rxdata", "sav", "save", "dat",
+        "json", "bak", "tmp", "old", "backup",
+        "glb", "bin", "txt"
+    ]
+    
+    guard let enumerator = fileManager.enumerator(at: gameURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+        return
+    }
+    
+    for case let fileURL as URL in enumerator {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { continue }
         
-        guard let enumerator = fileManager.enumerator(at: gameURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else {
-            return
-        }
-        
-        for case let fileURL as URL in enumerator {
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
-                  !isDirectory.boolValue else { continue }
+        let ext = fileURL.pathExtension.lowercased()
+        if archiveExtensions.contains(ext) {
+            // 排除系统垃圾文件
+            let fileName = fileURL.lastPathComponent.lowercased()
+            if fileName.hasPrefix(".") || fileName == "desktop.ini" || fileName == "thumbs.db" {
+                continue
+            }
             
-            let ext = fileURL.pathExtension.lowercased()
-            if archiveExtensions.contains(ext) {
-                do {
-                    let attrs = try fileManager.attributesOfItem(atPath: fileURL.path)
-                    let size = attrs[.size] as? Int64 ?? 0
-                    let modDate = attrs[.modificationDate] as? Date ?? Date()
-                    let file = ArchiveFile(
-                        url: fileURL,
-                        name: fileURL.lastPathComponent,
-                        size: size,
-                        modificationDate: modDate
-                    )
-                    archiveFiles.append(file)
-                } catch {
-                    print("读取文件属性失败: \(error)")
-                }
+            do {
+                let attrs = try fileManager.attributesOfItem(atPath: fileURL.path)
+                let size = attrs[.size] as? Int64 ?? 0
+                let modDate = attrs[.modificationDate] as? Date ?? Date()
+                let file = ArchiveFile(
+                    url: fileURL,
+                    name: fileURL.lastPathComponent,
+                    size: size,
+                    modificationDate: modDate
+                )
+                archiveFiles.append(file)
+            } catch {
+                print("读取文件属性失败: \(error)")
             }
         }
-        
-        // 按修改时间排序（最新的在前）
-        archiveFiles.sort { $0.modificationDate > $1.modificationDate }
     }
+    
+    archiveFiles.sort { $0.modificationDate > $1.modificationDate }
+}
     
     // MARK: - 导入存档
     
