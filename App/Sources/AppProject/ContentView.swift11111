@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
@@ -22,10 +23,9 @@ class GameViewController: UIViewController {
         
         guard let folderURL = folderURL else { return }
         
-        // 添加 WebView
         let webView = RPGWebView(folderURL: folderURL)
         let host = UIHostingController(rootView: webView)
-        host.view.backgroundColor = .black   // 新增：host 视图背景黑色
+        host.view.backgroundColor = .black
         addChild(host)
         view.addSubview(host.view)
         host.view.translatesAutoresizingMaskIntoConstraints = false
@@ -38,7 +38,6 @@ class GameViewController: UIViewController {
         host.didMove(toParent: self)
         hostingController = host
         
-        // 齿轮按钮
         gearButton = UIButton(type: .system)
         gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
         gearButton.tintColor = .white
@@ -55,7 +54,6 @@ class GameViewController: UIViewController {
         gearButton.addTarget(self, action: #selector(exitTapped), for: .touchUpInside)
     }
     
-    // ⭐ 强制横屏
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         return .landscape
     }
@@ -92,7 +90,7 @@ struct GameView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: GameViewController, context: Context) {}
 }
 
-// MARK: - 全屏覆盖工具（核心：将 GameViewController 添加到 UIWindow 上）
+// MARK: - 全屏覆盖工具
 class GameOverlayManager {
     static let shared = GameOverlayManager()
     private var gameWindow: UIWindow?
@@ -103,9 +101,8 @@ class GameOverlayManager {
             return
         }
         
-        // 创建独立的 UIWindow
         let window = UIWindow(windowScene: windowScene)
-        window.windowLevel = .alert + 1  // 覆盖所有其他视图
+        window.windowLevel = .alert + 1
         window.backgroundColor = .black
         
         let vc = GameViewController()
@@ -115,11 +112,8 @@ class GameOverlayManager {
             onExit()
         }
         window.rootViewController = vc
-        
-        // 强制横屏（在 window 显示前设置）
         window.makeKeyAndVisible()
         
-        // 强制旋转
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
         
@@ -132,7 +126,6 @@ class GameOverlayManager {
         gameWindow = nil
         gameVC = nil
         
-        // 恢复竖屏
         UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
     }
@@ -146,9 +139,18 @@ struct ContentView: View {
     @State private var isImporting = false
     @State private var importError: String?
     @State private var showErrorAlert = false
+    
     @State private var editingGameId: UUID?
     @State private var editingName: String = ""
     @State private var showRenameAlert = false
+    
+    @State private var showEditMenu = false
+    @State private var menuGameId: UUID?
+    
+    @State private var showIconPicker = false
+    @State private var pickerGameId: UUID?
+    
+    @State private var refreshID = UUID()
     
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
@@ -157,7 +159,6 @@ struct ContentView: View {
         NavigationStack {
             ZStack {
                 if let game = selectedGame {
-                    // 使用全屏覆盖方式打开游戏
                     Color.clear
                         .onAppear {
                             GameOverlayManager.shared.showGame(folderURL: getLocalGameURL(for: game)) {
@@ -169,7 +170,6 @@ struct ContentView: View {
                         }
                         .ignoresSafeArea()
                 } else {
-                    // 游戏库列表
                     VStack {
                         if games.isEmpty {
                             VStack(spacing: 20) {
@@ -210,8 +210,23 @@ struct ContentView: View {
                                                     .foregroundColor(.orange)
                                             }
                                         }
+                                        
                                         Spacer()
-                                        Image(systemName: "chevron.right")
+                                        
+                                        // 1️⃣ 编辑图标：更换为正方形风格图标
+                                        Button {
+                                            menuGameId = game.id
+                                            showEditMenu = true
+                                        } label: {
+                                            Image(systemName: "square.and.pencil")
+                                                .font(.title3)
+                                                .foregroundColor(.gray)
+                                        }
+                                        .buttonStyle(.plain)
+                                        
+                                        // 2️⃣ 启动图标：更换为播放电视风格图标
+                                        Image(systemName: "play.circle")
+                                            .font(.title3)
                                             .foregroundColor(.gray)
                                     }
                                     .contentShape(Rectangle())
@@ -219,7 +234,12 @@ struct ContentView: View {
                                         selectedGame = game
                                         updateLastPlayed(for: game.id)
                                     }
+                                    // 3️⃣ 长按菜单：新增「修改图标」
                                     .contextMenu {
+                                        Button("修改图标") {
+                                            pickerGameId = game.id
+                                            showIconPicker = true
+                                        }
                                         Button("重命名") {
                                             editingGameId = game.id
                                             editingName = game.name
@@ -235,6 +255,8 @@ struct ContentView: View {
                                 .onDelete(perform: deleteGames)
                             }
                             .listStyle(.plain)
+                            .id(refreshID)
+                            .environment(\.locale, Locale(identifier: "zh-Hans"))
                         }
                     }
                     .navigationTitle("游戏库")
@@ -279,6 +301,7 @@ struct ContentView: View {
                    let index = games.firstIndex(where: { $0.id == id }) {
                     games[index].name = editingName
                     saveGames()
+                    refreshID = UUID()
                 }
                 editingGameId = nil
             }
@@ -286,12 +309,39 @@ struct ContentView: View {
                 editingGameId = nil
             }
         }
+        // 铅笔按钮点击弹出的菜单（保留）
+        .confirmationDialog("编辑游戏", isPresented: $showEditMenu, titleVisibility: .visible) {
+            Button("修改图标") {
+                if let id = menuGameId {
+                    pickerGameId = id
+                    showIconPicker = true
+                }
+            }
+            Button("重命名") {
+                if let id = menuGameId,
+                   let game = games.first(where: { $0.id == id }) {
+                    editingGameId = id
+                    editingName = game.name
+                    showRenameAlert = true
+                }
+            }
+            Button("取消", role: .cancel) { }
+        }
+        .sheet(isPresented: $showIconPicker) {
+            ImagePicker(selectedImageData: { data in
+                guard let id = pickerGameId else { return }
+                saveIcon(data: data, for: id)
+                pickerGameId = nil
+                refreshID = UUID()
+            })
+        }
         .onAppear {
             loadGames()
         }
     }
     
     // MARK: - 辅助函数
+    
     private func getLocalGameURL(for game: GameItem) -> URL {
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
         return documents.appendingPathComponent(game.localPath)
@@ -317,6 +367,30 @@ struct ContentView: View {
             }
         }
         return Image(systemName: "gamecontroller.fill")
+    }
+    
+    // MARK: - 保存图标
+    private func saveIcon(data: Data, for gameId: UUID) {
+        guard let game = games.first(where: { $0.id == gameId }),
+              let index = games.firstIndex(where: { $0.id == gameId }) else {
+            return
+        }
+        let gameURL = getLocalGameURL(for: game)
+        let iconDir = gameURL.appendingPathComponent("icon")
+        
+        do {
+            if !fileManager.fileExists(atPath: iconDir.path) {
+                try fileManager.createDirectory(at: iconDir, withIntermediateDirectories: true)
+            }
+            let fileURL = iconDir.appendingPathComponent("icon.png")
+            try data.write(to: fileURL)
+            print("✅ 图标保存成功：\(fileURL.path)")
+            refreshID = UUID()
+        } catch {
+            print("❌ 保存图标失败：\(error)")
+            importError = "保存图标失败：\(error.localizedDescription)"
+            showErrorAlert = true
+        }
     }
     
     // MARK: - 导入逻辑
@@ -362,6 +436,7 @@ struct ContentView: View {
                     games.append(newGame)
                     saveGames()
                     isImporting = false
+                    refreshID = UUID()
                 }
             } catch {
                 await MainActor.run {
@@ -394,6 +469,7 @@ struct ContentView: View {
         }
         games.remove(at: index)
         saveGames()
+        refreshID = UUID()
     }
     
     // MARK: - 删除游戏（批量）
@@ -414,6 +490,48 @@ struct ContentView: View {
         guard let data = UserDefaults.standard.data(forKey: saveKey) else { return }
         if let decoded = try? JSONDecoder().decode([GameItem].self, from: data) {
             games = decoded
+        }
+    }
+}
+
+// MARK: - PHPicker 包装器
+struct ImagePicker: UIViewControllerRepresentable {
+    var selectedImageData: (Data) -> Void
+    
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 1
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let parent: ImagePicker
+        
+        init(_ parent: ImagePicker) {
+            self.parent = parent
+        }
+        
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            picker.dismiss(animated: true)
+            
+            guard let result = results.first else { return }
+            result.itemProvider.loadObject(ofClass: UIImage.self) { object, error in
+                if let image = object as? UIImage,
+                   let data = image.pngData() {
+                    DispatchQueue.main.async {
+                        self.parent.selectedImageData(data)
+                    }
+                }
+            }
         }
     }
 }
