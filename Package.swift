@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "RPG-TEXT",
     platforms: [
-        .iOS(.v16)
+        .iOS(.v15)  // ⭐ 改为 v15（兼容旧版本 Swift）
     ],
     products: [
         .library(name: "RPG-TEXT", targets: ["RPG-TEXT"])
@@ -16,7 +16,7 @@ let package = Package(
         .target(
             name: "RPG-TEXT",
             dependencies: ["ZIPFoundation"],
-            path: "App/Sources/AppProject"   // ⭐ 指向你的源代码目录
+            path: "App/Sources/AppProject"
         )
     ]
 )
