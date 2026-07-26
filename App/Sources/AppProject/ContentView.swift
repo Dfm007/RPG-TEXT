@@ -697,7 +697,7 @@ struct ArchiveManagerView: View {
     @State private var refreshID = UUID()
     
     private let fileManager = FileManager.default
-    private let archiveExtensions = ["rpgsave", "rvdata2", "rxdata", "sav", "save", "dat"]
+    private let archiveExtensions = ["duan"]
     
     struct ArchiveFile: Identifiable {
         let id = UUID()
