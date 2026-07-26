@@ -869,6 +869,7 @@ struct ArchiveManagerView: View {
             }
         }
         .listStyle(.plain)
+        .environment(\.locale, Locale(identifier: "zh-Hans"))
         .refreshable {
             scanArchives()
             refreshID = UUID()
