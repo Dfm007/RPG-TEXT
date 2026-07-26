@@ -809,11 +809,7 @@ private func scanArchives() {
     archiveFiles.removeAll()
     
     // 支持的存档扩展名（增加更多常见格式）
-    let archiveExtensions = [
-        "rpgsave", "rvdata2", "rxdata", "sav", "save", "dat",
-        "json", "bak", "tmp", "old", "backup",
-        "glb", "bin", "txt"
-    ]
+    let archiveExtensions = ["rpgsave", "rvdata2"]
     
     guard let enumerator = fileManager.enumerator(at: gameURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else {
         return
