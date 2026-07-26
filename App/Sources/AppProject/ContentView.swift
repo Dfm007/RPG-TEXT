@@ -200,16 +200,23 @@ class GameOverlayManager {
     }
 }
 
-// MARK: - 存档列表视图（从底部弹出）
+// MARK: - 存档列表视图（从底部弹出，带导入功能）
 struct ArchiveListView: View {
+    let gameURL: URL          // 游戏根目录
     let gameName: String
-    let archiveFiles: [(fileName: String, fileSize: Int64, modificationDate: Date)]
+    
     @Environment(\.dismiss) var dismiss
+    @State private var files: [(fileName: String, fileSize: Int64, modificationDate: Date)] = []
+    @State private var showFileImporter = false
+    @State private var importError: String?
+    @State private var showErrorAlert = false
+    
+    private let fileManager = FileManager.default
     
     var body: some View {
         NavigationView {
             List {
-                if archiveFiles.isEmpty {
+                if files.isEmpty {
                     HStack {
                         Spacer()
                         VStack(spacing: 16) {
@@ -219,7 +226,7 @@ struct ArchiveListView: View {
                             Text("暂无存档文件")
                                 .font(.headline)
                                 .foregroundColor(.gray)
-                            Text("请先在游戏内保存")
+                            Text("请先在游戏内保存，或点击「导入」添加")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -227,21 +234,28 @@ struct ArchiveListView: View {
                         Spacer()
                     }
                 } else {
-                    ForEach(archiveFiles.indices, id: \.self) { index in
-                        let file = archiveFiles[index]
+                    ForEach(files.indices, id: \.self) { index in
+                        let file = files[index]
                         let timeString = DateFormatter.localizedString(from: file.modificationDate, dateStyle: .short, timeStyle: .short)
                         let sizeString = ByteCountFormatter.string(fromByteCount: file.fileSize, countStyle: .file)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(file.fileName)
-                                .font(.headline)
-                            HStack(spacing: 16) {
-                                Text(sizeString)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text(timeString)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(file.fileName)
+                                    .font(.headline)
+                                HStack(spacing: 16) {
+                                    Text(sizeString)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Text(timeString)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
                             }
+                            Spacer()
+                            Button("导出") {
+                                exportFile(at: index)
+                            }
+                            .buttonStyle(.bordered)
                         }
                         .padding(.vertical, 4)
                     }
@@ -251,15 +265,126 @@ struct ArchiveListView: View {
             .navigationTitle("\(gameName) - 存档")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("完成") {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("关闭") {
                         dismiss()
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showFileImporter = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                        Text("导入")
+                    }
+                }
+            }
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.data],  // 允许所有数据文件，我们会过滤后缀
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    importArchive(from: url)
+                case .failure(let error):
+                    importError = "选择文件失败: \(error.localizedDescription)"
+                    showErrorAlert = true
+                }
+            }
+            .alert("导入错误", isPresented: $showErrorAlert, presenting: importError) { _ in
+                Button("确定") { }
+            } message: { error in
+                Text(error)
+            }
+            .onAppear {
+                loadFiles()
             }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+    
+    // MARK: - 加载存档列表
+    private func loadFiles() {
+        let saveDir = gameURL.appendingPathComponent("save")
+        guard fileManager.fileExists(atPath: saveDir.path) else {
+            files = []
+            return
+        }
+        do {
+            let contents = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
+            var newFiles: [(fileName: String, fileSize: Int64, modificationDate: Date)] = []
+            for url in contents {
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue {
+                    let attrs = try fileManager.attributesOfItem(atPath: url.path)
+                    let size = attrs[.size] as? Int64 ?? 0
+                    let modDate = attrs[.modificationDate] as? Date ?? Date()
+                    newFiles.append((url.lastPathComponent, size, modDate))
+                }
+            }
+            newFiles.sort { $0.2 > $1.2 }
+            files = newFiles
+        } catch {
+            print("读取存档目录失败: \(error)")
+            files = []
+        }
+    }
+    
+    // MARK: - 导入外部存档
+    private func importArchive(from sourceURL: URL) {
+        // 确保可以访问安全范围资源
+        guard sourceURL.startAccessingSecurityScopedResource() else {
+            importError = "无法访问所选文件"
+            showErrorAlert = true
+            return
+        }
+        defer { sourceURL.stopAccessingSecurityScopedResource() }
+        
+        // 只允许 .rpgsave 文件（检查后缀）
+        let ext = sourceURL.pathExtension.lowercased()
+        guard ext == "rpgsave" else {
+            importError = "请选择 .rpgsave 格式的存档文件"
+            showErrorAlert = true
+            return
+        }
+        
+        let saveDir = gameURL.appendingPathComponent("save")
+        do {
+            // 确保 save 目录存在
+            if !fileManager.fileExists(atPath: saveDir.path) {
+                try fileManager.createDirectory(at: saveDir, withIntermediateDirectories: true)
+            }
+            
+            let destURL = saveDir.appendingPathComponent(sourceURL.lastPathComponent)
+            // 如果已存在同名文件，先删除（覆盖）
+            if fileManager.fileExists(atPath: destURL.path) {
+                try fileManager.removeItem(at: destURL)
+            }
+            try fileManager.copyItem(at: sourceURL, to: destURL)
+            
+            // 重新加载列表
+            loadFiles()
+        } catch {
+            importError = "导入失败: \(error.localizedDescription)"
+            showErrorAlert = true
+        }
+    }
+    
+    // MARK: - 导出存档（分享）
+    private func exportFile(at index: Int) {
+        guard index < files.count else { return }
+        let fileName = files[index].fileName
+        let fileURL = gameURL.appendingPathComponent("save").appendingPathComponent(fileName)
+        guard fileManager.fileExists(atPath: fileURL.path) else { return }
+        
+        let activityVC = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            rootVC.present(activityVC, animated: true)
+        }
     }
 }
 
@@ -289,11 +414,11 @@ struct ContentView: View {
     
     @State private var refreshID = UUID()
     
-    // 存档列表相关（改为 sheet 弹出）
+    // 存档列表相关（改为 sheet 弹出，新增 gameURL）
     @State private var showArchiveSheet = false
     @State private var archiveGameId: UUID?
     @State private var archiveGameName: String = ""
-    @State private var archiveFiles: [(fileName: String, fileSize: Int64, modificationDate: Date)] = []
+    @State private var archiveGameURL: URL?   // 新增
 
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
@@ -367,27 +492,7 @@ struct ContentView: View {
                                         Button {
                                             archiveGameId = game.id
                                             archiveGameName = game.name
-                                            let gameURL = getLocalGameURL(for: game)
-                                            let saveDir = gameURL.appendingPathComponent("save")
-                                            var files: [(fileName: String, fileSize: Int64, modificationDate: Date)] = []
-                                            if fileManager.fileExists(atPath: saveDir.path) {
-                                                do {
-                                                    let contents = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
-                                                    for url in contents {
-                                                        var isDir: ObjCBool = false
-                                                        if fileManager.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue {
-                                                            let attrs = try fileManager.attributesOfItem(atPath: url.path)
-                                                            let size = attrs[.size] as? Int64 ?? 0
-                                                            let modDate = attrs[.modificationDate] as? Date ?? Date()
-                                                            files.append((url.lastPathComponent, size, modDate))
-                                                        }
-                                                    }
-                                                    files.sort { $0.2 > $1.2 }
-                                                } catch {
-                                                    print("读取存档目录失败: \(error)")
-                                                }
-                                            }
-                                            archiveFiles = files
+                                            archiveGameURL = getLocalGameURL(for: game)  // 记录URL
                                             showArchiveSheet = true
                                         } label: {
                                             Image(systemName: "tray.and.arrow.down")
@@ -534,12 +639,11 @@ struct ContentView: View {
             }
             Button("取消", role: .cancel) { }
         }
-        // 存档列表 Sheet（从底部弹出）
+        // 存档列表 Sheet（从底部弹出）—— 现在只传递 gameURL 和 gameName
         .sheet(isPresented: $showArchiveSheet) {
-            ArchiveListView(
-                gameName: archiveGameName,
-                archiveFiles: archiveFiles
-            )
+            if let url = archiveGameURL {
+                ArchiveListView(gameURL: url, gameName: archiveGameName)
+            }
         }
         .sheet(isPresented: $showIconPicker) {
             ImagePicker(selectedImageData: { data in
