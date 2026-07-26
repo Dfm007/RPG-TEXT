@@ -762,8 +762,16 @@ struct ArchiveManagerView: View {
         .listStyle(.plain)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(action: { showImportPicker = true }) {
-                    Image(systemName: "square.and.arrow.down")
+                HStack(spacing: 16) {
+                    Button(action: { showImportPicker = true }) {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    Button(action: { 
+                        scanArchives()
+                        refreshID = UUID()
+                    }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
                 }
             }
         }
