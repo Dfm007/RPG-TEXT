@@ -94,6 +94,7 @@ class GameViewController: UIViewController {
         saveButton.addTarget(self, action: #selector(saveTapped), for: .touchUpInside)
     }
     
+    // ⭐ 强制横屏（重写方向方法）
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         return .landscape
     }
@@ -104,22 +105,35 @@ class GameViewController: UIViewController {
         return true
     }
     
+    // ⭐ 新增：viewWillAppear 中使用现代 API 强制横屏
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // 尝试使用 UIWindowScene 的 requestGeometryUpdate（iOS 16+）
+        guard let windowScene = view.window?.windowScene else { return }
+        let preferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)
+        windowScene.requestGeometryUpdate(preferences) { error in
+            // 如果失败（如系统限制），降级到旧方式
+            UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
+    }
+    
     @objc private func exitTapped() {
         onExit?()
     }
     
-@objc private func saveTapped() {
-    guard let folderURL = folderURL else { return }
-    // 执行保存
-    onSaveMarker?(folderURL, folderURL.absoluteString)
-    
-    // ⭐ 显示保存成功提示
-    let alert = UIAlertController(title: nil, message: "存档保存成功", preferredStyle: .alert)
-    alert.addAction(UIAlertAction(title: "确定", style: .default))
-    DispatchQueue.main.async {
-        self.present(alert, animated: true)
+    @objc private func saveTapped() {
+        guard let folderURL = folderURL else { return }
+        // 执行保存
+        onSaveMarker?(folderURL, folderURL.absoluteString)
+        
+        // ⭐ 显示保存成功提示
+        let alert = UIAlertController(title: nil, message: "存档保存成功", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default))
+        DispatchQueue.main.async {
+            self.present(alert, animated: true)
+        }
     }
-}
     
     deinit {
         hostingController?.willMove(toParent: nil)
@@ -169,6 +183,7 @@ class GameOverlayManager {
         window.rootViewController = vc
         window.makeKeyAndVisible()
         
+        // 强制横屏（双重保障）
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
         
