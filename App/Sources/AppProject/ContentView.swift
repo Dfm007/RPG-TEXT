@@ -25,6 +25,7 @@ enum ImportState {
 class GameViewController: UIViewController {
     var folderURL: URL?
     var onExit: (() -> Void)?
+    
     private var hostingController: UIHostingController<RPGWebView>?
     private var gearButton: UIButton!
     
@@ -49,6 +50,7 @@ class GameViewController: UIViewController {
         host.didMove(toParent: self)
         hostingController = host
         
+        // 齿轮按钮（退出）
         gearButton = UIButton(type: .system)
         gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
         gearButton.tintColor = .white
@@ -166,9 +168,6 @@ struct ContentView: View {
     
     @State private var refreshID = UUID()
     
-    // ⭐ 存档管理器导航
-    @State private var archiveManagerGame: GameItem?
-    
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
     
@@ -186,18 +185,6 @@ struct ContentView: View {
                             GameOverlayManager.shared.hideGame()
                         }
                         .ignoresSafeArea()
-                } else if let game = archiveManagerGame {
-                    // ⭐ 存档管理器视图
-                    ArchiveManagerView(game: game, gameURL: getLocalGameURL(for: game))
-                        .navigationTitle("\(game.name) - 存档")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Button("返回") {
-                                    archiveManagerGame = nil
-                                }
-                            }
-                        }
                 } else {
                     VStack {
                         if games.isEmpty {
@@ -244,16 +231,6 @@ struct ContentView: View {
                                         }
                                         
                                         Spacer()
-                                        
-                                        // ⭐ 存档管理按钮（文件夹图标）
-                                        Button {
-                                            archiveManagerGame = game
-                                        } label: {
-                                            Image(systemName: "folder")
-                                                .font(.title3)
-                                                .foregroundColor(.blue)
-                                        }
-                                        .buttonStyle(.plain)
                                         
                                         Button {
                                             menuGameId = game.id
@@ -682,230 +659,6 @@ struct ContentView: View {
         if let decoded = try? JSONDecoder().decode([GameItem].self, from: data) {
             games = decoded
         }
-    }
-}
-
-// MARK: - ⭐ 存档管理器视图
-struct ArchiveManagerView: View {
-    let game: GameItem
-    let gameURL: URL
-    
-    @State private var archiveFiles: [ArchiveFile] = []
-    @State private var showImportPicker = false
-    @State private var importError: String?
-    @State private var showErrorAlert = false
-    @State private var refreshID = UUID()
-    
-    private let fileManager = FileManager.default
-    private let archiveExtensions = ["rpgsave", "rvdata2", "rxdata", "sav", "save", "dat"]
-    
-    struct ArchiveFile: Identifiable {
-        let id = UUID()
-        let url: URL
-        let name: String
-        let size: Int64
-        let modificationDate: Date
-        
-        var sizeFormatted: String {
-            let formatter = ByteCountFormatter()
-            formatter.countStyle = .file
-            return formatter.string(fromByteCount: size)
-        }
-        
-        var dateFormatted: String {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-            return formatter.string(from: modificationDate)
-        }
-    }
-    
-    var body: some View {
-        List {
-    if archiveFiles.isEmpty {
-        HStack {
-            Spacer()
-            VStack(spacing: 16) {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .font(.system(size: 44))
-                    .foregroundColor(.gray)
-                Text("暂无存档文件")
-                    .font(.headline)
-                    .foregroundColor(.gray)
-                Text("点击右上角「导入」添加存档")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.vertical, 40)
-            Spacer()
-        }
-    } else {
-        ForEach(archiveFiles) { file in
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(file.name)
-                        .font(.headline)
-                    HStack(spacing: 16) {
-                        Text(file.sizeFormatted)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Text(file.dateFormatted)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                Spacer()
-            }
-        }
-        .onDelete(perform: deleteArchives)
-    }
-}
-.listStyle(.plain)
-.refreshable {
-    scanArchives()
-    refreshID = UUID()
-}
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 16) {
-                    Button(action: { showImportPicker = true }) {
-                        Image(systemName: "square.and.arrow.down")
-                    }
-                    Button(action: { 
-                        scanArchives()
-                        refreshID = UUID()
-                    }) {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-            }
-        }
-        .fileImporter(
-            isPresented: $showImportPicker,
-            allowedContentTypes: [.data, .item],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                guard let selectedURL = urls.first else { return }
-                importArchive(from: selectedURL)
-            case .failure(let error):
-                importError = "选择文件失败: \(error.localizedDescription)"
-                showErrorAlert = true
-            }
-        }
-        .alert("导入错误", isPresented: $showErrorAlert, presenting: importError) { _ in
-            Button("确定") { }
-        } message: { error in
-            Text(error)
-        }
-        .onAppear {
-            scanArchives()
-        }
-        .id(refreshID)
-    }
-    
-// MARK: - 扫描存档文件（递归扫描所有子目录）
-private func scanArchives() {
-    archiveFiles.removeAll()
-    
-    // 支持的存档扩展名（增加更多常见格式）
-    let archiveExtensions = ["rpgsave", "rvdata2"]
-    
-    guard let enumerator = fileManager.enumerator(at: gameURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else {
-        return
-    }
-    
-    for case let fileURL as URL in enumerator {
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
-              !isDirectory.boolValue else { continue }
-        
-        let ext = fileURL.pathExtension.lowercased()
-        if archiveExtensions.contains(ext) {
-            // 排除系统垃圾文件
-            let fileName = fileURL.lastPathComponent.lowercased()
-            if fileName.hasPrefix(".") || fileName == "desktop.ini" || fileName == "thumbs.db" {
-                continue
-            }
-            
-            do {
-                let attrs = try fileManager.attributesOfItem(atPath: fileURL.path)
-                let size = attrs[.size] as? Int64 ?? 0
-                let modDate = attrs[.modificationDate] as? Date ?? Date()
-                let file = ArchiveFile(
-                    url: fileURL,
-                    name: fileURL.lastPathComponent,
-                    size: size,
-                    modificationDate: modDate
-                )
-                archiveFiles.append(file)
-            } catch {
-                print("读取文件属性失败: \(error)")
-            }
-        }
-    }
-    
-    archiveFiles.sort { $0.modificationDate > $1.modificationDate }
-}
-    
-    // MARK: - 导入存档
-    
-    private func importArchive(from sourceURL: URL) {
-        let didStartAccessing = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if didStartAccessing {
-                sourceURL.stopAccessingSecurityScopedResource()
-            }
-        }
-        
-        let fileName = sourceURL.lastPathComponent
-        
-        // 确定存档目录：优先使用 save/ 目录
-        let saveDir = gameURL.appendingPathComponent("save")
-        let targetDir: URL
-        if fileManager.fileExists(atPath: saveDir.path) {
-            targetDir = saveDir
-        } else {
-            targetDir = gameURL
-        }
-        
-        let targetURL = targetDir.appendingPathComponent(fileName)
-        
-        // 如果同名文件已存在，添加时间戳后缀
-        let finalURL: URL
-        if fileManager.fileExists(atPath: targetURL.path) {
-            let timestamp = Int(Date().timeIntervalSince1970)
-            let nameWithoutExt = (fileName as NSString).deletingPathExtension
-            let ext = (fileName as NSString).pathExtension
-            let newName = "\(nameWithoutExt)_\(timestamp).\(ext)"
-            finalURL = targetDir.appendingPathComponent(newName)
-        } else {
-            finalURL = targetURL
-        }
-        
-        do {
-            try fileManager.copyItem(at: sourceURL, to: finalURL)
-            scanArchives()
-            refreshID = UUID()
-        } catch {
-            importError = "导入失败: \(error.localizedDescription)"
-            showErrorAlert = true
-        }
-    }
-    
-    // MARK: - 删除存档
-    
-    private func deleteArchives(at offsets: IndexSet) {
-        for index in offsets {
-            let file = archiveFiles[index]
-            do {
-                try fileManager.removeItem(at: file.url)
-            } catch {
-                print("删除失败: \(error)")
-            }
-        }
-        scanArchives()
-        refreshID = UUID()
     }
 }
 
