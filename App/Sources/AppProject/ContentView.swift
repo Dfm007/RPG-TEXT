@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import PhotosUI
+import ZIPFoundation
 
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
@@ -8,6 +9,16 @@ struct GameItem: Identifiable, Codable {
     var name: String
     var localPath: String
     var lastPlayed: Date?
+}
+
+// MARK: - 解压进度状态
+enum ImportState {
+    case idle
+    case importing
+    case unzipping(progress: Double)
+    case processing
+    case done
+    case failed(String)
 }
 
 // MARK: - 强制横屏的 UIViewController
@@ -136,9 +147,12 @@ struct ContentView: View {
     @State private var games: [GameItem] = []
     @State private var showImporter = false
     @State private var selectedGame: GameItem?
-    @State private var isImporting = false
     @State private var importError: String?
     @State private var showErrorAlert = false
+    
+    @State private var importState: ImportState = .idle
+    @State private var progressValue: Double = 0
+    @State private var statusText: String = ""
     
     @State private var editingGameId: UUID?
     @State private var editingName: String = ""
@@ -179,8 +193,11 @@ struct ContentView: View {
                                 Text("无")
                                     .font(.title)
                                     .foregroundColor(.gray)
-                                Text("点击右上角「导入」添加游戏文件夹")
+                                Text("点击右上角「导入」添加游戏文件")
                                     .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text("支持 .zip 和 .apk 格式")
+                                    .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -213,7 +230,6 @@ struct ContentView: View {
                                         
                                         Spacer()
                                         
-                                        // 1️⃣ 编辑图标：更换为正方形风格图标
                                         Button {
                                             menuGameId = game.id
                                             showEditMenu = true
@@ -224,7 +240,6 @@ struct ContentView: View {
                                         }
                                         .buttonStyle(.plain)
                                         
-                                        // 2️⃣ 启动图标：更换为播放电视风格图标
                                         Image(systemName: "play.circle")
                                             .font(.title3)
                                             .foregroundColor(.gray)
@@ -234,7 +249,6 @@ struct ContentView: View {
                                         selectedGame = game
                                         updateLastPlayed(for: game.id)
                                     }
-                                    // 3️⃣ 长按菜单：新增「修改图标」
                                     .contextMenu {
                                         Button("修改图标") {
                                             pickerGameId = game.id
@@ -262,7 +276,7 @@ struct ContentView: View {
                     .navigationTitle("游戏库")
                     .toolbar {
                         ToolbarItem(placement: .navigationBarTrailing) {
-                            if isImporting {
+                            if case .importing = importState {
                                 ProgressView()
                                     .progressViewStyle(CircularProgressViewStyle())
                             } else {
@@ -272,20 +286,42 @@ struct ContentView: View {
                             }
                         }
                     }
+                    .overlay {
+                        if case .unzipping(let progress) = importState {
+                            VStack(spacing: 16) {
+                                ProgressView(value: progress, total: 1.0)
+                                    .progressViewStyle(.linear)
+                                    .frame(width: 200)
+                                Text("解压中... \(Int(progress * 100))%")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(24)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(Color(.systemBackground))
+                                    .shadow(radius: 10)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
+                            )
+                        }
+                    }
                 }
             }
         }
         .fileImporter(
             isPresented: $showImporter,
-            allowedContentTypes: [.folder],
+            allowedContentTypes: [.zip, .apk],
             allowsMultipleSelection: false
         ) { result in
             switch result {
             case .success(let urls):
                 guard let selectedURL = urls.first else { return }
-                importGameFolder(from: selectedURL)
+                importGameArchive(from: selectedURL)
             case .failure(let error):
-                importError = "选择文件夹失败: \(error.localizedDescription)"
+                importError = "选择文件失败: \(error.localizedDescription)"
                 showErrorAlert = true
             }
         }
@@ -309,7 +345,6 @@ struct ContentView: View {
                 editingGameId = nil
             }
         }
-        // 铅笔按钮点击弹出的菜单（保留）
         .confirmationDialog("编辑游戏", isPresented: $showEditMenu, titleVisibility: .visible) {
             Button("修改图标") {
                 if let id = menuGameId {
@@ -369,6 +404,219 @@ struct ContentView: View {
         return Image(systemName: "gamecontroller.fill")
     }
     
+    // MARK: - 写日志到文件（用于调试）
+    private func writeLog(_ message: String) {
+        let logURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("import_log.txt")
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .medium)
+        let line = "[\(timestamp)] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if fileManager.fileExists(atPath: logURL.path) {
+                if let handle = try? FileHandle(forWritingTo: logURL) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    try? handle.close()
+                }
+            } else {
+                try? data.write(to: logURL)
+            }
+        }
+    }
+    
+    // MARK: - ⭐ 核心：导入并解压 .zip / .apk
+    
+    private func importGameArchive(from sourceURL: URL) {
+        importState = .importing
+        writeLog("开始导入文件：\(sourceURL.lastPathComponent)")
+        
+        guard let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            importError = "无法访问应用目录"
+            showErrorAlert = true
+            importState = .idle
+            writeLog("错误：无法访问 Documents 目录")
+            return
+        }
+        
+        let archiveName = sourceURL.lastPathComponent
+        let gameName = (archiveName as NSString).deletingPathExtension
+        
+        // 检查是否已存在同名游戏
+        if games.contains(where: { $0.name == gameName }) {
+            importError = "已存在同名游戏「\(gameName)」，请先删除再导入"
+            showErrorAlert = true
+            importState = .idle
+            writeLog("错误：已存在同名游戏 \(gameName)")
+            return
+        }
+        
+        let destURL = documents.appendingPathComponent(gameName)
+        if fileManager.fileExists(atPath: destURL.path) {
+            try? fileManager.removeItem(at: destURL)
+        }
+        
+        Task {
+            do {
+                // 获取安全访问权限
+                let didStartAccessing = sourceURL.startAccessingSecurityScopedResource()
+                defer {
+                    if didStartAccessing {
+                        sourceURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+                
+                // 复制到临时目录
+                let tempDir = fileManager.temporaryDirectory
+                let tempFile = tempDir.appendingPathComponent(archiveName)
+                if fileManager.fileExists(atPath: tempFile.path) {
+                    try fileManager.removeItem(at: tempFile)
+                }
+                try fileManager.copyItem(at: sourceURL, to: tempFile)
+                writeLog("已复制到临时目录：\(tempFile.path)")
+                
+                // 创建解压目标目录
+                try fileManager.createDirectory(at: destURL, withIntermediateDirectories: true)
+                
+                // 解压
+                var lastProgress: Double = 0
+                try fileManager.unzipItem(at: tempFile, to: destURL) { item, total, current in
+                    let progress = Double(current) / Double(total)
+                    if progress - lastProgress > 0.01 || progress >= 1.0 {
+                        lastProgress = progress
+                        DispatchQueue.main.async {
+                            importState = .unzipping(progress: progress)
+                        }
+                    }
+                }
+                writeLog("解压完成，目标目录：\(destURL.path)")
+                
+                // 删除临时文件
+                try? fileManager.removeItem(at: tempFile)
+                
+                // 验证并扁平化目录
+                let finalGameURL = try await findAndFlattenGameDirectory(at: destURL)
+                writeLog("最终游戏目录：\(finalGameURL.path)")
+                
+                // 检查是否存在 index.html
+                let indexURL = finalGameURL.appendingPathComponent("index.html")
+                if !fileManager.fileExists(atPath: indexURL.path) {
+                    // 尝试递归搜索
+                    if let found = findIndexHTML(in: finalGameURL) {
+                        writeLog("在子目录中找到 index.html：\(found.path)")
+                        // 将找到的目录内容移动到上级
+                        let parent = found.deletingLastPathComponent()
+                        let contents = try fileManager.contentsOfDirectory(atPath: found.path)
+                        for item in contents {
+                            let src = found.appendingPathComponent(item)
+                            let dst = parent.appendingPathComponent(item)
+                            try fileManager.moveItem(at: src, to: dst)
+                        }
+                        try fileManager.removeItem(at: found)
+                        // 重新检查
+                        if fileManager.fileExists(atPath: parent.appendingPathComponent("index.html").path) {
+                            writeLog("index.html 已移动到根目录")
+                        } else {
+                            throw NSError(domain: "GameImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "未找到 index.html"])
+                        }
+                    } else {
+                        throw NSError(domain: "GameImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "未找到 index.html"])
+                    }
+                }
+                
+                // 验证通过，添加到游戏库
+                let relativePath = finalGameURL.lastPathComponent
+                let newGame = GameItem(name: gameName, localPath: relativePath, lastPlayed: nil)
+                
+                await MainActor.run {
+                    games.append(newGame)
+                    saveGames()
+                    importState = .idle
+                    refreshID = UUID()
+                    writeLog("✅ 游戏添加成功：\(gameName)")
+                }
+                
+            } catch {
+                // 清理残留文件
+                try? fileManager.removeItem(at: destURL)
+                await MainActor.run {
+                    importError = "导入失败：\(error.localizedDescription)"
+                    showErrorAlert = true
+                    importState = .idle
+                    writeLog("❌ 导入失败：\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
+    // MARK: - 递归查找 index.html
+    
+    private func findIndexHTML(in directory: URL) -> URL? {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        for case let fileURL as URL in enumerator {
+            if fileURL.lastPathComponent == "index.html" {
+                return fileURL
+            }
+        }
+        return nil
+    }
+    
+    // MARK: - 扁平化目录（处理嵌套）
+    
+    private func findAndFlattenGameDirectory(at url: URL) async throws -> URL {
+        let contents = try fileManager.contentsOfDirectory(atPath: url.path)
+        
+        // 如果根目录有 index.html，直接返回
+        if contents.contains("index.html") {
+            return url
+        }
+        
+        // 只有一个子文件夹且内部有 index.html
+        if contents.count == 1 {
+            let subPath = url.appendingPathComponent(contents[0])
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: subPath.path, isDirectory: &isDir),
+               isDir.boolValue {
+                let subContents = try fileManager.contentsOfDirectory(atPath: subPath.path)
+                if subContents.contains("index.html") {
+                    // 移动所有内容到上层
+                    for item in subContents {
+                        let src = subPath.appendingPathComponent(item)
+                        let dst = url.appendingPathComponent(item)
+                        try fileManager.moveItem(at: src, to: dst)
+                    }
+                    try fileManager.removeItem(at: subPath)
+                    return url
+                }
+            }
+        }
+        
+        // 遍历所有子目录，查找包含 index.html 的
+        for item in contents {
+            let subPath = url.appendingPathComponent(item)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: subPath.path, isDirectory: &isDir),
+               isDir.boolValue {
+                if let found = findIndexHTML(in: subPath) {
+                    let parent = found.deletingLastPathComponent()
+                    // 将 parent 内的所有内容移动到 url
+                    let moveContents = try fileManager.contentsOfDirectory(atPath: parent.path)
+                    for moveItem in moveContents {
+                        let src = parent.appendingPathComponent(moveItem)
+                        let dst = url.appendingPathComponent(moveItem)
+                        try fileManager.moveItem(at: src, to: dst)
+                    }
+                    try fileManager.removeItem(at: parent)
+                    return url
+                }
+            }
+        }
+        
+        // 还是没找到，返回原路径（后续会因验证失败而报错）
+        return url
+    }
+    
     // MARK: - 保存图标
     private func saveIcon(data: Data, for gameId: UUID) {
         guard let game = games.first(where: { $0.id == gameId }),
@@ -390,61 +638,6 @@ struct ContentView: View {
             print("❌ 保存图标失败：\(error)")
             importError = "保存图标失败：\(error.localizedDescription)"
             showErrorAlert = true
-        }
-    }
-    
-    // MARK: - 导入逻辑
-    private func importGameFolder(from sourceURL: URL) {
-        isImporting = true
-        
-        guard let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            importError = "无法访问应用目录"
-            showErrorAlert = true
-            isImporting = false
-            return
-        }
-        
-        let folderName = sourceURL.lastPathComponent
-        let destURL = documents.appendingPathComponent(folderName)
-        
-        if games.contains(where: { $0.name == folderName }) {
-            importError = "已存在同名游戏「\(folderName)」，请先删除再导入"
-            showErrorAlert = true
-            isImporting = false
-            return
-        }
-        
-        Task {
-            do {
-                let didStartAccessing = sourceURL.startAccessingSecurityScopedResource()
-                defer {
-                    if didStartAccessing {
-                        sourceURL.stopAccessingSecurityScopedResource()
-                    }
-                }
-                
-                if fileManager.fileExists(atPath: destURL.path) {
-                    try fileManager.removeItem(at: destURL)
-                }
-                
-                try fileManager.copyItem(at: sourceURL, to: destURL)
-                
-                let relativePath = destURL.lastPathComponent
-                let newGame = GameItem(name: folderName, localPath: relativePath, lastPlayed: nil)
-                
-                await MainActor.run {
-                    games.append(newGame)
-                    saveGames()
-                    isImporting = false
-                    refreshID = UUID()
-                }
-            } catch {
-                await MainActor.run {
-                    importError = "复制游戏失败: \(error.localizedDescription)"
-                    showErrorAlert = true
-                    isImporting = false
-                }
-            }
         }
     }
     
@@ -533,5 +726,17 @@ struct ImagePicker: UIViewControllerRepresentable {
                 }
             }
         }
+    }
+}
+
+// ⭐ 扩展 UTType 支持 .apk 和 .zip
+import UniformTypeIdentifiers
+
+extension UTType {
+    static var apk: UTType {
+        UTType(importedAs: "application/vnd.android.package-archive")
+    }
+    static var zip: UTType {
+        UTType(importedAs: "com.pkware.zip-archive")
     }
 }
