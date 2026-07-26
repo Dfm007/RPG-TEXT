@@ -25,6 +25,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "saveGameFile")
         contentController.add(context.coordinator, name: "loadGameFile")
         contentController.add(context.coordinator, name: "bridgeReady")
+        contentController.add(context.coordinator, name: "localStorageReport") // 新增
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -99,9 +100,11 @@ struct RPGWebView: UIViewRepresentable {
             case "saveGameFile":
                 handleSave(message: message)
             case "loadGameFile":
-                break
+                handleLoad(message: message)
             case "bridgeReady":
                 log("📨 \(message.body)")
+            case "localStorageReport":
+                log("📦 localStorage 报告: \(message.body)")
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -125,6 +128,11 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
+        private func handleLoad(message: WKScriptMessage) {
+            // 记录加载请求
+            log("📥 收到 loadGameFile: \(message.body)")
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             log("🌐 页面加载完成")
             let script = RPGWebView.bridgeJavaScript()
@@ -144,12 +152,13 @@ struct RPGWebView: UIViewRepresentable {
                         self.log("✅ 延迟注入成功")
                     }
                 }
-                // 检查 StorageManager 状态
+                // 发送检测脚本
                 let checkScript = """
                 (function() {
                     var status = '未定义';
                     if (typeof StorageManager !== 'undefined') {
                         status = '已定义，save方法' + (StorageManager.save ? '已覆盖' : '未覆盖');
+                        status += ', load方法' + (StorageManager.load ? '已覆盖' : '未覆盖');
                     }
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
                         window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager: ' + status);
@@ -185,9 +194,10 @@ struct RPGWebView: UIViewRepresentable {
                 return;
             }
 
+            // 拦截 save
             var originalSave = StorageManager.save;
             StorageManager.save = function(savefile) {
-                // 先调用原始方法，确保 localStorage 被更新
+                // 先调用原始方法，更新 localStorage
                 var result = originalSave.call(this, savefile);
 
                 // 然后发送给 Native
@@ -195,32 +205,49 @@ struct RPGWebView: UIViewRepresentable {
                 var fileName = 'file' + fileId + '.rpgsave';
                 var data = JSON.stringify(savefile);
 
-                // 如果数据为空，记录日志（通过 messageHandlers）
                 if (!data || data === '{}') {
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                        window.webkit.messageHandlers.bridgeReady.postMessage('⚠️ 存档数据为空，savefile: ' + JSON.stringify(savefile));
+                        window.webkit.messageHandlers.bridgeReady.postMessage('⚠️ 存档数据为空');
+                    }
+                } else {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
+                        try {
+                            window.webkit.messageHandlers.saveGameFile.postMessage({
+                                fileName: fileName,
+                                data: data
+                            });
+                            console.log('📤 存档已发送到 Native：' + fileName);
+                        } catch (e) {
+                            console.error('发送存档失败:', e);
+                        }
                     }
                 }
 
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
-                    try {
-                        window.webkit.messageHandlers.saveGameFile.postMessage({
-                            fileName: fileName,
-                            data: data
-                        });
-                        console.log('📤 存档已发送到 Native：' + fileName);
-                    } catch (e) {
-                        console.error('发送存档失败:', e);
+                // 额外：报告 localStorage 中的存档列表
+                try {
+                    var keys = Object.keys(localStorage);
+                    var report = 'localStorage keys: ' + keys.join(', ');
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.localStorageReport) {
+                        window.webkit.messageHandlers.localStorageReport.postMessage(report);
                     }
-                } else {
-                    console.warn('Native bridge not available');
-                }
+                } catch (e) {}
 
                 return result;
             };
 
+            // 拦截 load
+            var originalLoad = StorageManager.load;
+            StorageManager.load = function(savefileId) {
+                var result = originalLoad.call(this, savefileId);
+                var msg = '加载存档 ID: ' + savefileId + ', 结果: ' + (result ? '成功' : '失败');
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadGameFile) {
+                    window.webkit.messageHandlers.loadGameFile.postMessage(msg);
+                }
+                return result;
+            };
+
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('✅ StorageManager.save 已覆盖');
+                window.webkit.messageHandlers.bridgeReady.postMessage('✅ StorageManager.save 和 load 已覆盖');
             }
             console.log('✅ 桥接注入完成');
         })();
