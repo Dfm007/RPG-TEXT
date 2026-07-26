@@ -110,9 +110,10 @@ class GameViewController: UIViewController {
     
 @objc private func saveTapped() {
     guard let folderURL = folderURL else { return }
-    // 显示保存中的提示（可选）
+    // 执行保存
     onSaveMarker?(folderURL, folderURL.absoluteString)
-    // 显示保存成功提示
+    
+    // ⭐ 显示保存成功提示
     let alert = UIAlertController(title: nil, message: "存档保存成功", preferredStyle: .alert)
     alert.addAction(UIAlertAction(title: "确定", style: .default))
     DispatchQueue.main.async {
@@ -1022,28 +1023,21 @@ struct ArchiveManagerView: View {
     }
     
     // MARK: - 删除存档（含墓碑）
-    private func deleteArchives(at offsets: IndexSet) {
-        for index in offsets {
-            let file = archiveFiles[index]
-            if file.isGraveMarker {
-                // 删除墓碑（从 UserDefaults 中移除）
-                var markers = loadGraveMarkers()
-                markers.removeAll { $0.id == file.markerId }
-                if let data = try? JSONEncoder().encode(markers) {
-                    UserDefaults.standard.set(data, forKey: "GraveMarkers")
-                }
-            } else {
-                // 删除普通存档文件
-                do {
-                    try fileManager.removeItem(at: file.url)
-                } catch {
-                    print("删除失败: \(error)")
-                }
+private func deleteArchives(at offsets: IndexSet) {
+    for index in offsets {
+        let file = archiveFiles[index]
+        if file.isGraveMarker {
+            var markers = loadGraveMarkers()
+            markers.removeAll { $0.id == file.markerId }
+            if let data = try? JSONEncoder().encode(markers) {
+                UserDefaults.standard.set(data, forKey: "GraveMarkers")
             }
+        } else {
+            try? fileManager.removeItem(at: file.url)
         }
-        scanArchives()
-        refreshID = UUID()
     }
+    scanArchives()
+    refreshID = UUID()
 }
 
 // MARK: - PHPicker 包装器
