@@ -2,15 +2,21 @@
 import PackageDescription
 
 let package = Package(
-    name: "RPG-TEXT", // 这里替换为你的项目名
+    name: "RPG-TEXT",
+    platforms: [
+        .iOS(.v16)
+    ],
+    products: [
+        .library(name: "RPG-TEXT", targets: ["RPG-TEXT"])
+    ],
     dependencies: [
-        // 添加 ZIPFoundation 依赖
-        .package(url: "https://github.com/weichsel/ZIPFoundation.git", .upToNextMajor(from: "0.9.0")),
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", .upToNextMajor(from: "0.9.0"))
     ],
     targets: [
         .target(
-            name: "RPG-TEXT", // 这里替换为你的 Target 名
-            dependencies: ["ZIPFoundation"] // 在依赖中引用
-        ),
+            name: "RPG-TEXT",
+            dependencies: ["ZIPFoundation"],
+            path: "App/Sources/AppProject"   // ⭐ 指向你的源代码目录
+        )
     ]
 )
