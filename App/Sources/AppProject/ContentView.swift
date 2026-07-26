@@ -6,7 +6,10 @@ import UniformTypeIdentifiers
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
     let id = UUID()
-    var name: String
+    var gameId: UUID          // 关联的游戏ID
+    var name: String          // 自动生成：日期时间
+    var url: String            // 保存时的游戏URL
+    var createdAt: Date        // 创建时间
     var localPath: String
     var lastPlayed: Date?
 }
