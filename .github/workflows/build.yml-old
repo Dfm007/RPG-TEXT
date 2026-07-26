@@ -1,0 +1,100 @@
+name: Build Unsigned IPA
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # 下载最新版 ZIPFoundation（main 分支）
+      - name: Download ZIPFoundation (latest)
+        run: |
+          git clone --depth 1 https://github.com/weichsel/ZIPFoundation.git /tmp/ZIPFoundation
+          cp -R /tmp/ZIPFoundation/Sources/ZIPFoundation/* App/Sources/AppProject/
+
+      # 获取 SDK 路径
+      - name: Get SDK path
+        id: sdk
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
+          echo "SDKROOT=$SDK_PATH" >> $GITHUB_ENV
+
+      # 编译所有 Swift 源文件
+      - name: Compile Swift sources
+        run: |
+          mkdir -p build
+          find App/Sources/AppProject -name "*.swift" > sources.txt
+          swiftc \
+            -target arm64-apple-ios16.0 \
+            -sdk $SDK_PATH \
+            -emit-executable \
+            -module-name TEXT \
+            -o build/TEXT \
+            -framework UIKit \
+            -framework SwiftUI \
+            -framework WebKit \
+            -parse-as-library \
+            @sources.txt
+
+      # 创建 .app 包
+      - name: Create .app bundle
+        run: |
+          mkdir -p Payload/TEXT.app
+          cp build/TEXT Payload/TEXT.app/
+          cat > Payload/TEXT.app/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleExecutable</key>
+              <string>TEXT</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.example.TEXT</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>TEXT</string>
+              <key>CFBundleDisplayName</key>
+              <string>TEXT</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UIFileSharingEnabled</key>
+              <true/>
+              <key>LSSupportsOpeningDocumentsInPlace</key>
+              <true/>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+      # 打包 IPA
+      - name: Package IPA
+        run: |
+          zip -r TEXT.ipa Payload/
+
+      # 上传 IPA
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TEXT-unsigned
+          path: TEXT.ipa
