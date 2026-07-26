@@ -25,9 +25,11 @@ enum ImportState {
 class GameViewController: UIViewController {
     var folderURL: URL?
     var onExit: (() -> Void)?
+    var gameId: UUID?          // ⭐ 新增：用于标识当前游戏
     
     private var hostingController: UIHostingController<RPGWebView>?
     private var gearButton: UIButton!
+    private var webViewRef: WKWebView?   // ⭐ 持有 webView 引用
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -35,7 +37,10 @@ class GameViewController: UIViewController {
         
         guard let folderURL = folderURL else { return }
         
-        let webView = RPGWebView(folderURL: folderURL)
+        // 创建 RPGWebView，捕获 webView
+        let webView = RPGWebView(folderURL: folderURL) { [weak self] webView in
+            self?.webViewRef = webView
+        }
         let host = UIHostingController(rootView: webView)
         host.view.backgroundColor = .black
         addChild(host)
@@ -50,7 +55,7 @@ class GameViewController: UIViewController {
         host.didMove(toParent: self)
         hostingController = host
         
-        // 齿轮按钮（退出）
+        // 齿轮按钮（改为菜单触发）
         gearButton = UIButton(type: .system)
         gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
         gearButton.tintColor = .white
@@ -64,9 +69,58 @@ class GameViewController: UIViewController {
             gearButton.widthAnchor.constraint(equalToConstant: 40),
             gearButton.heightAnchor.constraint(equalToConstant: 40)
         ])
-        gearButton.addTarget(self, action: #selector(exitTapped), for: .touchUpInside)
+        gearButton.addTarget(self, action: #selector(gearButtonTapped), for: .touchUpInside)
     }
     
+    // ⭐ 齿轮按钮点击弹出菜单
+    @objc private func gearButtonTapped() {
+        let alertController = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+        
+        // 保存游戏
+        let saveAction = UIAlertAction(title: "保存游戏", style: .default) { [weak self] _ in
+            self?.saveGame()
+        }
+        
+        // 返回主界面
+        let exitAction = UIAlertAction(title: "返回主界面", style: .destructive) { [weak self] _ in
+            self?.onExit?()
+        }
+        
+        let cancelAction = UIAlertAction(title: "取消", style: .cancel)
+        
+        alertController.addAction(saveAction)
+        alertController.addAction(exitAction)
+        alertController.addAction(cancelAction)
+        
+        // 适配 iPad
+        if let popover = alertController.popoverPresentationController {
+            popover.sourceView = gearButton
+            popover.sourceRect = gearButton.bounds
+        }
+        
+        present(alertController, animated: true)
+    }
+    
+    // ⭐ 保存游戏逻辑
+    private func saveGame() {
+        guard let gameId = gameId,
+              let webView = webViewRef else {
+            print("❌ 无法保存：缺少 gameId 或 webView")
+            return
+        }
+        
+        // 调用 AutoSaveManager 保存
+        AutoSaveManager.shared.saveGameState(for: gameId, webView: webView)
+        
+        // 显示保存成功提示
+        let alert = UIAlertController(title: nil, message: "游戏已保存", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "确定", style: .default))
+        DispatchQueue.main.async {
+            self.present(alert, animated: true)
+        }
+    }
+    
+    // 横屏设置
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         return .landscape
     }
@@ -77,16 +131,15 @@ class GameViewController: UIViewController {
         return true
     }
     
-    @objc private func exitTapped() {
-        onExit?()
-    }
-    
     deinit {
         hostingController?.willMove(toParent: nil)
         hostingController?.view.removeFromSuperview()
         hostingController?.removeFromParent()
     }
 }
+}
+
+
 
 // MARK: - UIViewControllerRepresentable
 struct GameView: UIViewControllerRepresentable {
