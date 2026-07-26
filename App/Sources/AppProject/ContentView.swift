@@ -1,7 +1,6 @@
 import SwiftUI
 import UIKit
 import PhotosUI
-import ZIPFoundation
 
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
