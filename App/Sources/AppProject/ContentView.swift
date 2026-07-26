@@ -108,18 +108,23 @@ class GameViewController: UIViewController {
         onExit?()
     }
     
-    // ⭐ 保存墓碑
-    @objc private func saveTapped() {
-        guard let folderURL = folderURL else { return }
-        // 获取当前 WebView 的 URL（通过 KVO 或直接获取，这里简化：用 folderURL 的 absoluteString）
-        // 注意：实际游戏中 URL 可能变化，这里我们只能用初始 URL，更好的方式是从 WebView 获取当前 URL。
-        // 由于我们没有暴露 WebView，暂时用 folderURL 的字符串作为占位。
-        // 如果游戏是 SPA，URL 可能不变，我们只能保存初始 URL，用户手动操作。
-        // 更完善的做法是在 WebView 中注入 JavaScript 获取当前 location.href。
-        // 此处为了简化，我们使用 folderURL 的 absoluteString。
-        let currentURLString = folderURL.absoluteString
-        onSaveMarker?(folderURL, currentURLString)
+@objc private func saveTapped() {
+    guard let folderURL = folderURL else { return }
+    // 通过 WebView 获取当前页面 URL
+    if let webView = hostingController?.rootView.webView {
+        webView.evaluateJavaScript("window.location.href") { [weak self] result, error in
+            if let urlString = result as? String, !urlString.isEmpty {
+                self?.onSaveMarker?(folderURL, urlString)
+            } else {
+                // 降级：使用 folderURL
+                self?.onSaveMarker?(folderURL, folderURL.absoluteString)
+            }
+        }
+    } else {
+        // 降级：使用 folderURL
+        onSaveMarker?(folderURL, folderURL.absoluteString)
     }
+}
     
     deinit {
         hostingController?.willMove(toParent: nil)
