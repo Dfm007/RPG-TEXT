@@ -11,15 +11,6 @@ struct GameItem: Identifiable, Codable {
     var lastPlayed: Date?
 }
 
-// MARK: - 墓碑数据结构
-struct GraveMarker: Identifiable, Codable {
-    let id = UUID()
-    var gameId: UUID          // 关联的游戏ID
-    var name: String           // 自动生成：日期时间
-    var url: String            // 保存时的游戏URL
-    var createdAt: Date        // 创建时间
-}
-
 // MARK: - 解压进度状态
 enum ImportState {
     case idle
@@ -34,11 +25,8 @@ enum ImportState {
 class GameViewController: UIViewController {
     var folderURL: URL?
     var onExit: (() -> Void)?
-    var onSaveMarker: ((URL, String) -> Void)?  // ⭐ 墓碑保存回调
-    
     private var hostingController: UIHostingController<RPGWebView>?
     private var gearButton: UIButton!
-    private var saveButton: UIButton!
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -61,7 +49,6 @@ class GameViewController: UIViewController {
         host.didMove(toParent: self)
         hostingController = host
         
-        // 齿轮按钮（退出）
         gearButton = UIButton(type: .system)
         gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
         gearButton.tintColor = .white
@@ -76,25 +63,8 @@ class GameViewController: UIViewController {
             gearButton.heightAnchor.constraint(equalToConstant: 40)
         ])
         gearButton.addTarget(self, action: #selector(exitTapped), for: .touchUpInside)
-        
-        // ⭐ 新增保存按钮（墓碑）
-        saveButton = UIButton(type: .system)
-        saveButton.setImage(UIImage(systemName: "square.and.arrow.down"), for: .normal)
-        saveButton.tintColor = .white
-        saveButton.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        saveButton.layer.cornerRadius = 20
-        saveButton.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(saveButton)
-        NSLayoutConstraint.activate([
-            saveButton.topAnchor.constraint(equalTo: gearButton.bottomAnchor, constant: 8),
-            saveButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
-            saveButton.widthAnchor.constraint(equalToConstant: 40),
-            saveButton.heightAnchor.constraint(equalToConstant: 40)
-        ])
-        saveButton.addTarget(self, action: #selector(saveTapped), for: .touchUpInside)
     }
     
-    // ⭐ 强制横屏（重写方向方法）
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         return .landscape
     }
@@ -105,34 +75,8 @@ class GameViewController: UIViewController {
         return true
     }
     
-    // ⭐ 新增：viewWillAppear 中使用现代 API 强制横屏
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        // 尝试使用 UIWindowScene 的 requestGeometryUpdate（iOS 16+）
-        guard let windowScene = view.window?.windowScene else { return }
-        let preferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)
-        windowScene.requestGeometryUpdate(preferences) { error in
-            // 如果失败（如系统限制），降级到旧方式
-            UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
-            UIViewController.attemptRotationToDeviceOrientation()
-        }
-    }
-    
     @objc private func exitTapped() {
         onExit?()
-    }
-    
-    @objc private func saveTapped() {
-        guard let folderURL = folderURL else { return }
-        // 执行保存
-        onSaveMarker?(folderURL, folderURL.absoluteString)
-        
-        // ⭐ 显示保存成功提示
-        let alert = UIAlertController(title: nil, message: "存档保存成功", preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "确定", style: .default))
-        DispatchQueue.main.async {
-            self.present(alert, animated: true)
-        }
     }
     
     deinit {
@@ -146,13 +90,11 @@ class GameViewController: UIViewController {
 struct GameView: UIViewControllerRepresentable {
     let folderURL: URL
     let onExit: () -> Void
-    let onSaveMarker: (URL, String) -> Void
     
     func makeUIViewController(context: Context) -> GameViewController {
         let vc = GameViewController()
         vc.folderURL = folderURL
         vc.onExit = onExit
-        vc.onSaveMarker = onSaveMarker
         return vc
     }
     
@@ -183,7 +125,6 @@ class GameOverlayManager {
         window.rootViewController = vc
         window.makeKeyAndVisible()
         
-        // 强制横屏（双重保障）
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
         
@@ -225,7 +166,7 @@ struct ContentView: View {
     
     @State private var refreshID = UUID()
     
-    // 存档管理器导航
+    // ⭐ 存档管理器导航
     @State private var archiveManagerGame: GameItem?
     
     private let saveKey = "GameLibrary"
@@ -235,47 +176,29 @@ struct ContentView: View {
         NavigationStack {
             ZStack {
                 if let game = selectedGame {
-                    // 游戏视图（带保存按钮）
-                    GameView(
-                        folderURL: getLocalGameURL(for: game),
-                        onExit: {
-                            selectedGame = nil
-                        },
-                        onSaveMarker: { folderURL, urlString in
-                            saveGraveMarker(gameId: game.id, url: urlString)
+                    Color.clear
+                        .onAppear {
+                            GameOverlayManager.shared.showGame(folderURL: getLocalGameURL(for: game)) {
+                                selectedGame = nil
+                            }
                         }
-                    )
-                    .ignoresSafeArea()
+                        .onDisappear {
+                            GameOverlayManager.shared.hideGame()
+                        }
+                        .ignoresSafeArea()
                 } else if let game = archiveManagerGame {
-                    // 存档管理器视图
-                    ArchiveManagerView(
-                        game: game,
-                        gameURL: getLocalGameURL(for: game),
-                        onStartGame: { loadURL in
-                            // 关闭存档管理器，启动游戏
-                            archiveManagerGame = nil
-                            if let loadURL = loadURL {
-                                // 如果是墓碑，尝试通过 URL 恢复（这里暂不实现自动恢复，只打开游戏）
-                                // 实际中可扩展：将 URL 传给 GameView 加载
-                                selectedGame = game
-                            } else {
-                                selectedGame = game
-                            }
-                            // 更新最后游玩时间
-                            updateLastPlayed(for: game.id)
-                        }
-                    )
-                    .navigationTitle("\(game.name) - 存档")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .navigationBarLeading) {
-                            Button("返回") {
-                                archiveManagerGame = nil
+                    // ⭐ 存档管理器视图
+                    ArchiveManagerView(game: game, gameURL: getLocalGameURL(for: game))
+                        .navigationTitle("\(game.name) - 存档")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarLeading) {
+                                Button("返回") {
+                                    archiveManagerGame = nil
+                                }
                             }
                         }
-                    }
                 } else {
-                    // 游戏库列表
                     VStack {
                         if games.isEmpty {
                             VStack(spacing: 20) {
@@ -322,7 +245,7 @@ struct ContentView: View {
                                         
                                         Spacer()
                                         
-                                        // 存档管理按钮（文件夹图标）
+                                        // ⭐ 存档管理按钮（文件夹图标）
                                         Button {
                                             archiveManagerGame = game
                                         } label: {
@@ -506,7 +429,7 @@ struct ContentView: View {
         return Image(systemName: "gamecontroller.fill")
     }
     
-    // MARK: - 写日志
+    // MARK: - 写日志到文件（用于调试）
     private func writeLog(_ message: String) {
         let logURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
             .appendingPathComponent("import_log.txt")
@@ -525,7 +448,8 @@ struct ContentView: View {
         }
     }
     
-    // MARK: - 导入游戏
+    // MARK: - 导入并解压 .zip / .apk
+    
     private func importGameArchive(from sourceURL: URL) {
         importState = .importing
         writeLog("开始导入文件：\(sourceURL.lastPathComponent)")
@@ -633,7 +557,8 @@ struct ContentView: View {
         }
     }
     
-    // MARK: - 查找 index.html
+    // MARK: - 递归查找 index.html
+    
     private func findIndexHTML(in directory: URL) -> URL? {
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: nil) else {
@@ -648,6 +573,7 @@ struct ContentView: View {
     }
     
     // MARK: - 扁平化目录
+    
     private func findAndFlattenGameDirectory(at url: URL) async throws -> URL {
         let contents = try fileManager.contentsOfDirectory(atPath: url.path)
         
@@ -757,40 +683,12 @@ struct ContentView: View {
             games = decoded
         }
     }
-    
-    // MARK: - 墓碑管理
-    private func saveGraveMarker(gameId: UUID, url: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        let timeString = formatter.string(from: Date())
-        let marker = GraveMarker(
-            gameId: gameId,
-            name: "💀 \(timeString)",
-            url: url,
-            createdAt: Date()
-        )
-        var markers = loadGraveMarkers()
-        markers.append(marker)
-        saveGraveMarkers(markers)
-    }
-    
-    private func saveGraveMarkers(_ markers: [GraveMarker]) {
-        if let data = try? JSONEncoder().encode(markers) {
-            UserDefaults.standard.set(data, forKey: "GraveMarkers")
-        }
-    }
-    
-    private func loadGraveMarkers() -> [GraveMarker] {
-        guard let data = UserDefaults.standard.data(forKey: "GraveMarkers") else { return [] }
-        return (try? JSONDecoder().decode([GraveMarker].self, from: data)) ?? []
-    }
 }
 
 // MARK: - ⭐ 存档管理器视图
 struct ArchiveManagerView: View {
     let game: GameItem
     let gameURL: URL
-    let onStartGame: (String?) -> Void   // 传递 URL 或 nil
     
     @State private var archiveFiles: [ArchiveFile] = []
     @State private var showImportPicker = false
@@ -799,6 +697,7 @@ struct ArchiveManagerView: View {
     @State private var refreshID = UUID()
     
     private let fileManager = FileManager.default
+    private let archiveExtensions = ["rpgsave", "rvdata2", "rxdata", "sav", "save", "dat"]
     
     struct ArchiveFile: Identifiable {
         let id = UUID()
@@ -806,9 +705,6 @@ struct ArchiveManagerView: View {
         let name: String
         let size: Int64
         let modificationDate: Date
-        var isGraveMarker: Bool = false
-        var markerId: UUID? = nil
-        var markerURL: String? = nil
         
         var sizeFormatted: String {
             let formatter = ByteCountFormatter()
@@ -825,76 +721,56 @@ struct ArchiveManagerView: View {
     
     var body: some View {
         List {
-            if archiveFiles.isEmpty {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 16) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 44))
-                            .foregroundColor(.gray)
-                        Text("暂无存档文件或墓碑")
-                            .font(.headline)
-                            .foregroundColor(.gray)
-                        Text("点击右上角「导入」添加存档")
+    if archiveFiles.isEmpty {
+        HStack {
+            Spacer()
+            VStack(spacing: 16) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 44))
+                    .foregroundColor(.gray)
+                Text("暂无存档文件")
+                    .font(.headline)
+                    .foregroundColor(.gray)
+                Text("点击右上角「导入」添加存档")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 40)
+            Spacer()
+        }
+    } else {
+        ForEach(archiveFiles) { file in
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(file.name)
+                        .font(.headline)
+                    HStack(spacing: 16) {
+                        Text(file.sizeFormatted)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(file.dateFormatted)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    .padding(.vertical, 40)
-                    Spacer()
                 }
-            } else {
-                ForEach(archiveFiles) { file in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(file.name)
-                                    .font(.headline)
-                                if file.isGraveMarker {
-                                    Image(systemName: "flag.fill")
-                                        .foregroundColor(.orange)
-                                        .font(.caption)
-                                }
-                            }
-                            HStack(spacing: 16) {
-                                if !file.isGraveMarker {
-                                    Text(file.sizeFormatted)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                Text(file.dateFormatted)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        Spacer()
-                        // 以此存档启动游戏按钮
-                        Button("启动") {
-                            if file.isGraveMarker {
-                                onStartGame(file.markerURL)
-                            } else {
-                                onStartGame(nil)
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    }
-                }
-                .onDelete(perform: deleteArchives)
+                Spacer()
             }
         }
-        .listStyle(.plain)
-        .environment(\.locale, Locale(identifier: "zh-Hans"))  // ⭐ 删除按钮中文
-        .refreshable {
-            scanArchives()
-            refreshID = UUID()
-        }
+        .onDelete(perform: deleteArchives)
+    }
+}
+.listStyle(.plain)
+.refreshable {
+    scanArchives()
+    refreshID = UUID()
+}
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 HStack(spacing: 16) {
                     Button(action: { showImportPicker = true }) {
                         Image(systemName: "square.and.arrow.down")
                     }
-                    Button(action: {
+                    Button(action: { 
                         scanArchives()
                         refreshID = UUID()
                     }) {
@@ -928,74 +804,52 @@ struct ArchiveManagerView: View {
         .id(refreshID)
     }
     
-    // MARK: - 扫描存档文件（包含墓碑）
-    private func scanArchives() {
-        archiveFiles.removeAll()
+// MARK: - 扫描存档文件（递归扫描所有子目录）
+private func scanArchives() {
+    archiveFiles.removeAll()
+    
+    // 支持的存档扩展名（增加更多常见格式）
+    let archiveExtensions = ["rpgsave", "rvdata2"]
+    
+    guard let enumerator = fileManager.enumerator(at: gameURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+        return
+    }
+    
+    for case let fileURL as URL in enumerator {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { continue }
         
-        // 1. 扫描普通存档文件（.rpgsave）
-        let archiveExtensions = ["rpgsave"]
-        guard let enumerator = fileManager.enumerator(at: gameURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey]) else {
-            return
-        }
-        
-        for case let fileURL as URL in enumerator {
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory),
-                  !isDirectory.boolValue else { continue }
+        let ext = fileURL.pathExtension.lowercased()
+        if archiveExtensions.contains(ext) {
+            // 排除系统垃圾文件
+            let fileName = fileURL.lastPathComponent.lowercased()
+            if fileName.hasPrefix(".") || fileName == "desktop.ini" || fileName == "thumbs.db" {
+                continue
+            }
             
-            let ext = fileURL.pathExtension.lowercased()
-            if archiveExtensions.contains(ext) {
-                let fileName = fileURL.lastPathComponent.lowercased()
-                if fileName.hasPrefix(".") || fileName == "desktop.ini" || fileName == "thumbs.db" {
-                    continue
-                }
-                
-                do {
-                    let attrs = try fileManager.attributesOfItem(atPath: fileURL.path)
-                    let size = attrs[.size] as? Int64 ?? 0
-                    let modDate = attrs[.modificationDate] as? Date ?? Date()
-                    let file = ArchiveFile(
-                        url: fileURL,
-                        name: fileURL.lastPathComponent,
-                        size: size,
-                        modificationDate: modDate,
-                        isGraveMarker: false,
-                        markerId: nil,
-                        markerURL: nil
-                    )
-                    archiveFiles.append(file)
-                } catch {
-                    print("读取文件属性失败: \(error)")
-                }
+            do {
+                let attrs = try fileManager.attributesOfItem(atPath: fileURL.path)
+                let size = attrs[.size] as? Int64 ?? 0
+                let modDate = attrs[.modificationDate] as? Date ?? Date()
+                let file = ArchiveFile(
+                    url: fileURL,
+                    name: fileURL.lastPathComponent,
+                    size: size,
+                    modificationDate: modDate
+                )
+                archiveFiles.append(file)
+            } catch {
+                print("读取文件属性失败: \(error)")
             }
         }
-        
-        // 2. 加载墓碑（只加载当前游戏的）
-        let allMarkers = loadGraveMarkers()
-        let markers = allMarkers.filter { $0.gameId == game.id }
-        for marker in markers {
-            let file = ArchiveFile(
-                url: gameURL,
-                name: marker.name,
-                size: 0,
-                modificationDate: marker.createdAt,
-                isGraveMarker: true,
-                markerId: marker.id,
-                markerURL: marker.url
-            )
-            archiveFiles.append(file)
-        }
-        
-        archiveFiles.sort { $0.modificationDate > $1.modificationDate }
     }
     
-    // MARK: - 加载墓碑
-    private func loadGraveMarkers() -> [GraveMarker] {
-        guard let data = UserDefaults.standard.data(forKey: "GraveMarkers") else { return [] }
-        return (try? JSONDecoder().decode([GraveMarker].self, from: data)) ?? []
-    }
+    archiveFiles.sort { $0.modificationDate > $1.modificationDate }
+}
     
     // MARK: - 导入存档
+    
     private func importArchive(from sourceURL: URL) {
         let didStartAccessing = sourceURL.startAccessingSecurityScopedResource()
         defer {
@@ -1005,6 +859,8 @@ struct ArchiveManagerView: View {
         }
         
         let fileName = sourceURL.lastPathComponent
+        
+        // 确定存档目录：优先使用 save/ 目录
         let saveDir = gameURL.appendingPathComponent("save")
         let targetDir: URL
         if fileManager.fileExists(atPath: saveDir.path) {
@@ -1014,6 +870,8 @@ struct ArchiveManagerView: View {
         }
         
         let targetURL = targetDir.appendingPathComponent(fileName)
+        
+        // 如果同名文件已存在，添加时间戳后缀
         let finalURL: URL
         if fileManager.fileExists(atPath: targetURL.path) {
             let timestamp = Int(Date().timeIntervalSince1970)
@@ -1035,24 +893,15 @@ struct ArchiveManagerView: View {
         }
     }
     
-    // MARK: - 删除存档（含墓碑）
+    // MARK: - 删除存档
+    
     private func deleteArchives(at offsets: IndexSet) {
         for index in offsets {
             let file = archiveFiles[index]
-            if file.isGraveMarker {
-                // 删除墓碑（从 UserDefaults 移除）
-                var markers = loadGraveMarkers()
-                markers.removeAll { $0.id == file.markerId }
-                if let data = try? JSONEncoder().encode(markers) {
-                    UserDefaults.standard.set(data, forKey: "GraveMarkers")
-                }
-            } else {
-                // 删除普通存档文件
-                do {
-                    try fileManager.removeItem(at: file.url)
-                } catch {
-                    print("删除失败: \(error)")
-                }
+            do {
+                try fileManager.removeItem(at: file.url)
+            } catch {
+                print("删除失败: \(error)")
             }
         }
         scanArchives()
