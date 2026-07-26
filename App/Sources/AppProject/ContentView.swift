@@ -134,20 +134,15 @@ struct GameView: UIViewControllerRepresentable {
     let onExit: () -> Void
     let onSaveMarker: (URL, String) -> Void
     
-    func makeUIViewController(context: Context) -> UINavigationController {
+    func makeUIViewController(context: Context) -> GameViewController {
         let vc = GameViewController()
         vc.folderURL = folderURL
         vc.onExit = onExit
         vc.onSaveMarker = onSaveMarker
-        let nav = UINavigationController(rootViewController: vc)
-        nav.setNavigationBarHidden(true, animated: false)
-        nav.modalPresentationStyle = .fullScreen
-        // ⭐ 强制导航控制器支持横屏
-        nav.supportedInterfaceOrientations = .landscape
-        return nav
+        return vc
     }
     
-    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {}
+    func updateUIViewController(_ uiViewController: GameViewController, context: Context) {}
 }
 
 // MARK: - 全屏覆盖工具
