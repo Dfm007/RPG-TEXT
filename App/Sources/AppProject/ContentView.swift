@@ -852,13 +852,11 @@ struct ArchiveManagerView: View {
                             }
                         }
                         Spacer()
-                        // ⭐ 以此存档启动游戏按钮
+                        // 以此存档启动游戏按钮
                         Button("启动") {
                             if file.isGraveMarker {
-                                // 墓碑：尝试加载保存的 URL
                                 onStartGame(file.markerURL)
                             } else {
-                                // 普通存档：只打开游戏，不传 URL
                                 onStartGame(nil)
                             }
                         }
@@ -870,7 +868,7 @@ struct ArchiveManagerView: View {
             }
         }
         .listStyle(.plain)
-        .environment(\.locale, Locale(identifier: "zh-Hans"))
+        .environment(\.locale, Locale(identifier: "zh-Hans"))  // ⭐ 删除按钮中文
         .refreshable {
             scanArchives()
             refreshID = UUID()
@@ -957,11 +955,12 @@ struct ArchiveManagerView: View {
             }
         }
         
-        // 2. 加载墓碑
-        let markers = loadGraveMarkers().filter { $0.gameId == game.id }
+        // 2. 加载墓碑（只加载当前游戏的）
+        let allMarkers = loadGraveMarkers()
+        let markers = allMarkers.filter { $0.gameId == game.id }
         for marker in markers {
             let file = ArchiveFile(
-                url: gameURL,   // 占位
+                url: gameURL,
                 name: marker.name,
                 size: 0,
                 modificationDate: marker.createdAt,
@@ -972,7 +971,6 @@ struct ArchiveManagerView: View {
             archiveFiles.append(file)
         }
         
-        // 按修改时间排序（最新的在前）
         archiveFiles.sort { $0.modificationDate > $1.modificationDate }
     }
     
@@ -1023,21 +1021,28 @@ struct ArchiveManagerView: View {
     }
     
     // MARK: - 删除存档（含墓碑）
-private func deleteArchives(at offsets: IndexSet) {
-    for index in offsets {
-        let file = archiveFiles[index]
-        if file.isGraveMarker {
-            var markers = loadGraveMarkers()
-            markers.removeAll { $0.id == file.markerId }
-            if let data = try? JSONEncoder().encode(markers) {
-                UserDefaults.standard.set(data, forKey: "GraveMarkers")
+    private func deleteArchives(at offsets: IndexSet) {
+        for index in offsets {
+            let file = archiveFiles[index]
+            if file.isGraveMarker {
+                // 删除墓碑（从 UserDefaults 移除）
+                var markers = loadGraveMarkers()
+                markers.removeAll { $0.id == file.markerId }
+                if let data = try? JSONEncoder().encode(markers) {
+                    UserDefaults.standard.set(data, forKey: "GraveMarkers")
+                }
+            } else {
+                // 删除普通存档文件
+                do {
+                    try fileManager.removeItem(at: file.url)
+                } catch {
+                    print("删除失败: \(error)")
+                }
             }
-        } else {
-            try? fileManager.removeItem(at: file.url)
         }
+        scanArchives()
+        refreshID = UUID()
     }
-    scanArchives()
-    refreshID = UUID()
 }
 
 // MARK: - PHPicker 包装器
