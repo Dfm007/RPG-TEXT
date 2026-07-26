@@ -22,7 +22,7 @@ enum ImportState {
     case failed(String)
 }
 
-// MARK: - 强制横屏的 UIViewController（无桥接，无保存）
+// MARK: - 强制横屏的 UIViewController
 class GameViewController: UIViewController {
     var folderURL: URL?
     var onExit: (() -> Void)?
@@ -38,7 +38,6 @@ class GameViewController: UIViewController {
         
         guard let folderURL = folderURL else { return }
         
-        // 创建 WebView（使用标准配置）
         let webView = RPGWebView(folderURL: folderURL) { [weak self] webView in
             self?.webViewRef = webView
         }
@@ -56,7 +55,6 @@ class GameViewController: UIViewController {
         host.didMove(toParent: self)
         hostingController = host
         
-        // 齿轮按钮（仅返回主界面）
         gearButton = UIButton(type: .system)
         gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
         gearButton.tintColor = .white
@@ -72,7 +70,6 @@ class GameViewController: UIViewController {
         ])
         gearButton.addTarget(self, action: #selector(gearButtonTapped), for: .touchUpInside)
         
-        // 音频恢复通知
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAppDidBecomeActive),
@@ -83,11 +80,9 @@ class GameViewController: UIViewController {
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // 强制横屏
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
     }
     
-    // MARK: - 齿轮菜单（仅返回主界面）
     @objc private func gearButtonTapped() {
         let alertController = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
         
@@ -106,7 +101,6 @@ class GameViewController: UIViewController {
         present(alertController, animated: true)
     }
     
-    // MARK: - 音频恢复
     @objc private func handleAppDidBecomeActive() {
         guard let webView = webViewRef else { return }
         let script = """
@@ -125,7 +119,6 @@ class GameViewController: UIViewController {
         webView.evaluateJavaScript(script, completionHandler: nil)
     }
     
-    // MARK: - 横屏设置
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         return .landscape
     }
@@ -168,7 +161,6 @@ class GameOverlayManager {
     private var gameVC: GameViewController?
     
     func showGame(folderURL: URL, gameId: UUID, onExit: @escaping () -> Void) {
-        // 锁定横屏
         AppDelegate.orientationLock = .landscape
         UIViewController.attemptRotationToDeviceOrientation()
         
@@ -190,7 +182,6 @@ class GameOverlayManager {
         window.rootViewController = vc
         window.makeKeyAndVisible()
         
-        // 强制横屏
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
         
@@ -203,10 +194,72 @@ class GameOverlayManager {
         gameWindow = nil
         gameVC = nil
         
-        // 恢复竖屏
         AppDelegate.orientationLock = .portrait
         UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
+    }
+}
+
+// MARK: - 存档列表视图（从底部弹出）
+struct ArchiveListView: View {
+    let gameName: String
+    let archiveFiles: [(fileName: String, fileSize: Int64, modificationDate: Date)]
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        NavigationView {
+            List {
+                if archiveFiles.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 16) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.system(size: 44))
+                                .foregroundColor(.gray)
+                            Text("暂无存档文件")
+                                .font(.headline)
+                                .foregroundColor(.gray)
+                            Text("请先在游戏内保存")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 40)
+                        Spacer()
+                    }
+                } else {
+                    ForEach(archiveFiles.indices, id: \.self) { index in
+                        let file = archiveFiles[index]
+                        let timeString = DateFormatter.localizedString(from: file.modificationDate, dateStyle: .short, timeStyle: .short)
+                        let sizeString = ByteCountFormatter.string(fromByteCount: file.fileSize, countStyle: .file)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(file.fileName)
+                                .font(.headline)
+                            HStack(spacing: 16) {
+                                Text(sizeString)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(timeString)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .navigationTitle("\(gameName) - 存档")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 
@@ -236,9 +289,10 @@ struct ContentView: View {
     
     @State private var refreshID = UUID()
     
-    // 读存档相关
-    @State private var showArchiveList = false
+    // 存档列表相关（改为 sheet 弹出）
+    @State private var showArchiveSheet = false
     @State private var archiveGameId: UUID?
+    @State private var archiveGameName: String = ""
     @State private var archiveFiles: [(fileName: String, fileSize: Int64, modificationDate: Date)] = []
 
     private let saveKey = "GameLibrary"
@@ -309,9 +363,10 @@ struct ContentView: View {
                                         
                                         Spacer()
                                         
-                                        // 读存档按钮（扫描游戏目录下的 save/ 文件夹）
+                                        // 查看存档按钮（仅查看，不启动游戏）
                                         Button {
                                             archiveGameId = game.id
+                                            archiveGameName = game.name
                                             let gameURL = getLocalGameURL(for: game)
                                             let saveDir = gameURL.appendingPathComponent("save")
                                             var files: [(fileName: String, fileSize: Int64, modificationDate: Date)] = []
@@ -333,12 +388,7 @@ struct ContentView: View {
                                                 }
                                             }
                                             archiveFiles = files
-                                            if archiveFiles.isEmpty {
-                                                importError = "没有找到存档，请先在游戏内保存"
-                                                showErrorAlert = true
-                                            } else {
-                                                showArchiveList = true
-                                            }
+                                            showArchiveSheet = true
                                         } label: {
                                             Image(systemName: "tray.and.arrow.down")
                                                 .font(.title3)
@@ -484,24 +534,12 @@ struct ContentView: View {
             }
             Button("取消", role: .cancel) { }
         }
-        .confirmationDialog("选择存档", isPresented: $showArchiveList, titleVisibility: .visible) {
-            ForEach(archiveFiles.indices, id: \.self) { index in
-                let file = archiveFiles[index]
-                let timeString = DateFormatter.localizedString(from: file.modificationDate, dateStyle: .short, timeStyle: .short)
-                let sizeString = ByteCountFormatter.string(fromByteCount: file.fileSize, countStyle: .file)
-                Button("\(file.fileName) (\(sizeString) \(timeString))") {
-                    guard let gameId = archiveGameId,
-                          let game = games.first(where: { $0.id == gameId }) else { return }
-                    // 直接启动游戏，游戏引擎会读取 save/ 下的存档
-                    GameOverlayManager.shared.showGame(
-                        folderURL: getLocalGameURL(for: game),
-                        gameId: gameId,
-                        onExit: { }
-                    )
-                    updateLastPlayed(for: game.id)
-                }
-            }
-            Button("取消", role: .cancel) { }
+        // 存档列表 Sheet（从底部弹出）
+        .sheet(isPresented: $showArchiveSheet) {
+            ArchiveListView(
+                gameName: archiveGameName,
+                archiveFiles: archiveFiles
+            )
         }
         .sheet(isPresented: $showIconPicker) {
             ImagePicker(selectedImageData: { data in
