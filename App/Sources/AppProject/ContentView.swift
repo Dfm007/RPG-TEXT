@@ -152,6 +152,8 @@ struct ContentView: View {
     @State private var importError: String?
     @State private var showErrorAlert = false
     
+    @State private var showingSettings = false
+    
     @State private var importState: ImportState = .idle
     @State private var progressValue: Double = 0
     @State private var statusText: String = ""
@@ -167,7 +169,7 @@ struct ContentView: View {
     @State private var pickerGameId: UUID?
     
     @State private var refreshID = UUID()
-    
+
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
     
@@ -276,18 +278,27 @@ struct ContentView: View {
                         }
                     }
                     .navigationTitle("游戏库")
-                    .toolbar {
-                        ToolbarItem(placement: .navigationBarTrailing) {
-                            if case .importing = importState {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle())
-                            } else {
-                                Button(action: { showImporter = true }) {
-                                    Image(systemName: "folder.badge.plus")
-                                }
-                            }
-                        }
-                    }
+.toolbar {
+    ToolbarItem(placement: .navigationBarTrailing) {
+        HStack(spacing: 16) {
+            // 设置按钮（新增）
+            Button(action: { showingSettings = true }) {
+                Image(systemName: "gear")
+                    .font(.title3)
+            }
+            
+            // 原有的导入按钮
+            if case .importing = importState {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle())
+            } else {
+                Button(action: { showImporter = true }) {
+                    Image(systemName: "folder.badge.plus")
+                }
+            }
+        }
+    }
+}
                     .overlay {
                         if case .unzipping(let progress) = importState {
                             VStack(spacing: 16) {
@@ -375,6 +386,9 @@ struct ContentView: View {
         .onAppear {
             loadGames()
         }
+        .sheet(isPresented: $showingSettings) {
+    SettingsView()
+}
     }
     
     // MARK: - 辅助函数
