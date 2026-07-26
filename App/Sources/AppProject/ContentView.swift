@@ -2,7 +2,6 @@ import SwiftUI
 import UIKit
 import PhotosUI
 
-
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
     let id = UUID()
@@ -476,17 +475,15 @@ struct ContentView: View {
                 // 创建解压目标目录
                 try fileManager.createDirectory(at: destURL, withIntermediateDirectories: true)
                 
-                // 解压
-                var lastProgress: Double = 0
-                try fileManager.unzipItem(at: tempFile, to: destURL) { item, total, current in
-                    let progress = Double(current) / Double(total)
-                    if progress - lastProgress > 0.01 || progress >= 1.0 {
-                        lastProgress = progress
-                        DispatchQueue.main.async {
-                            importState = .unzipping(progress: progress)
-                        }
+                // ⭐ 解压（使用 Progress 对象，适配最新 API）
+                let progress = Progress(totalUnitCount: 0)
+                let observation = progress.observe(\.fractionCompleted) { prog, _ in
+                    DispatchQueue.main.async {
+                        importState = .unzipping(progress: prog.fractionCompleted)
                     }
                 }
+                try fileManager.unzipItem(at: tempFile, to: destURL, progress: progress)
+                observation.invalidate()
                 writeLog("解压完成，目标目录：\(destURL.path)")
                 
                 // 删除临时文件
@@ -619,10 +616,7 @@ struct ContentView: View {
     
     // MARK: - 保存图标
     private func saveIcon(data: Data, for gameId: UUID) {
-        guard let game = games.first(where: { $0.id == gameId }),
-              let index = games.firstIndex(where: { $0.id == gameId }) else {
-            return
-        }
+        guard let game = games.first(where: { $0.id == gameId }) else { return }
         let gameURL = getLocalGameURL(for: game)
         let iconDir = gameURL.appendingPathComponent("icon")
         
