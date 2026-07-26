@@ -256,6 +256,7 @@ struct ContentView: View {
                             }
                             .listStyle(.plain)
                             .id(refreshID)
+                            .environment(\.locale, Locale(identifier: "zh-Hans"))
                         }
                     }
                     .navigationTitle("游戏库")
