@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 import PhotosUI
 import UniformTypeIdentifiers
-import WebKit   // ⭐ 新增：解决 WKWebView 类型找不到的问题
+import WebKit
 
 // MARK: - 游戏数据模型
 struct GameItem: Identifiable, Codable {
@@ -26,11 +26,12 @@ enum ImportState {
 class GameViewController: UIViewController {
     var folderURL: URL?
     var onExit: (() -> Void)?
-    var gameId: UUID?          // ⭐ 新增：用于标识当前游戏
+    var gameId: UUID?
+    var loadURL: String?          // ⭐ 用于加载特定存档URL
     
     private var hostingController: UIHostingController<RPGWebView>?
     private var gearButton: UIButton!
-    private var webViewRef: WKWebView?   // ⭐ 持有 webView 引用，用于保存
+    private var webViewRef: WKWebView?
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -38,7 +39,6 @@ class GameViewController: UIViewController {
         
         guard let folderURL = folderURL else { return }
         
-        // 创建 RPGWebView，捕获 webView 引用
         let webView = RPGWebView(folderURL: folderURL) { [weak self] webView in
             self?.webViewRef = webView
         }
@@ -56,7 +56,6 @@ class GameViewController: UIViewController {
         host.didMove(toParent: self)
         hostingController = host
         
-        // 齿轮按钮（点击弹出菜单）
         gearButton = UIButton(type: .system)
         gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
         gearButton.tintColor = .white
@@ -73,28 +72,32 @@ class GameViewController: UIViewController {
         gearButton.addTarget(self, action: #selector(gearButtonTapped), for: .touchUpInside)
     }
     
-    // ⭐ 齿轮按钮点击 → 弹出菜单
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // ⭐ 如果存在 loadURL，则加载该 URL（用于读存档）
+        if let loadURL = loadURL, let url = URL(string: loadURL), let webView = webViewRef {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                webView.load(URLRequest(url: url))
+                print("🔄 已加载存档 URL: \(loadURL)")
+            }
+        }
+    }
+    
     @objc private func gearButtonTapped() {
         let alertController = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
         
-        // 1. 保存游戏
         let saveAction = UIAlertAction(title: "保存游戏", style: .default) { [weak self] _ in
             self?.saveGame()
         }
-        
-        // 2. 返回主界面
         let exitAction = UIAlertAction(title: "返回主界面", style: .destructive) { [weak self] _ in
             self?.onExit?()
         }
-        
-        // 3. 取消
         let cancelAction = UIAlertAction(title: "取消", style: .cancel)
         
         alertController.addAction(saveAction)
         alertController.addAction(exitAction)
         alertController.addAction(cancelAction)
         
-        // iPad 适配
         if let popover = alertController.popoverPresentationController {
             popover.sourceView = gearButton
             popover.sourceRect = gearButton.bounds
@@ -103,18 +106,15 @@ class GameViewController: UIViewController {
         present(alertController, animated: true)
     }
     
-    // ⭐ 保存游戏（调用 AutoSaveManager）
     @objc private func saveGame() {
         guard let gameId = gameId,
               let webView = webViewRef else {
-            print("❌ 无法保存：缺少 gameId 或 webView")
             let alert = UIAlertController(title: "保存失败", message: "无法获取游戏信息", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "确定", style: .default))
             present(alert, animated: true)
             return
         }
         
-        // 显示保存中
         let loadingAlert = UIAlertController(title: nil, message: "正在保存...", preferredStyle: .alert)
         present(loadingAlert, animated: true)
         
@@ -133,7 +133,6 @@ class GameViewController: UIViewController {
         }
     }
     
-    // MARK: - 横屏强制设置
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         return .landscape
     }
@@ -154,13 +153,13 @@ class GameViewController: UIViewController {
 // MARK: - UIViewControllerRepresentable
 struct GameView: UIViewControllerRepresentable {
     let folderURL: URL
-    let gameId: UUID          // ⭐ 新增
+    let gameId: UUID
     let onExit: () -> Void
     
     func makeUIViewController(context: Context) -> GameViewController {
         let vc = GameViewController()
         vc.folderURL = folderURL
-        vc.gameId = gameId     // ⭐ 传递 gameId
+        vc.gameId = gameId
         vc.onExit = onExit
         return vc
     }
@@ -168,14 +167,13 @@ struct GameView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: GameViewController, context: Context) {}
 }
 
-
 // MARK: - 全屏覆盖工具
 class GameOverlayManager {
     static let shared = GameOverlayManager()
     private var gameWindow: UIWindow?
     private var gameVC: GameViewController?
     
-    func showGame(folderURL: URL, gameId: UUID, onExit: @escaping () -> Void) {
+    func showGame(folderURL: URL, gameId: UUID, loadURL: String? = nil, onExit: @escaping () -> Void) {
         // 1️⃣ 锁定横屏
         AppDelegate.orientationLock = .landscape
         UIViewController.attemptRotationToDeviceOrientation()
@@ -191,6 +189,7 @@ class GameOverlayManager {
         let vc = GameViewController()
         vc.folderURL = folderURL
         vc.gameId = gameId
+        vc.loadURL = loadURL          // ⭐ 传递存档URL
         vc.onExit = { [weak self] in
             self?.hideGame()
             onExit()
@@ -198,7 +197,7 @@ class GameOverlayManager {
         window.rootViewController = vc
         window.makeKeyAndVisible()
         
-        // 2️⃣ 再次强制横屏
+        // 2️⃣ 强制横屏
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
         
@@ -217,7 +216,6 @@ class GameOverlayManager {
         UIViewController.attemptRotationToDeviceOrientation()
     }
 }
-
 
 // MARK: - 主界面
 struct ContentView: View {
@@ -244,6 +242,11 @@ struct ContentView: View {
     @State private var pickerGameId: UUID?
     
     @State private var refreshID = UUID()
+    
+    // ⭐ 读存档相关
+    @State private var showArchiveList = false
+    @State private var archiveGameId: UUID?
+    @State private var archiveURLs: [(url: String, timestamp: Date)] = []
 
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
@@ -251,22 +254,24 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-if let game = selectedGame {
-    Color.clear
-        .onAppear {
-            GameOverlayManager.shared.showGame(
-                folderURL: getLocalGameURL(for: game),
-                gameId: game.id,
-                onExit: {
-                    selectedGame = nil
-                }
-            )
-        }
-        .onDisappear {
-            GameOverlayManager.shared.hideGame()
-        }
-        .ignoresSafeArea()
-} else {
+                if let game = selectedGame {
+                    Color.clear
+                        .onAppear {
+                            // 普通启动（不带存档）
+                            GameOverlayManager.shared.showGame(
+                                folderURL: getLocalGameURL(for: game),
+                                gameId: game.id,
+                                loadURL: nil,
+                                onExit: {
+                                    selectedGame = nil
+                                }
+                            )
+                        }
+                        .onDisappear {
+                            GameOverlayManager.shared.hideGame()
+                        }
+                        .ignoresSafeArea()
+                } else {
                     VStack {
                         if games.isEmpty {
                             VStack(spacing: 20) {
@@ -313,6 +318,23 @@ if let game = selectedGame {
                                         
                                         Spacer()
                                         
+                                        // ⭐ 读存档按钮
+                                        Button {
+                                            archiveGameId = game.id
+                                            archiveURLs = AutoSaveManager.shared.getArchives(for: game.id)
+                                            if archiveURLs.isEmpty {
+                                                importError = "没有找到存档，请先保存游戏"
+                                                showErrorAlert = true
+                                            } else {
+                                                showArchiveList = true
+                                            }
+                                        } label: {
+                                            Image(systemName: "tray.and.arrow.down")
+                                                .font(.title3)
+                                                .foregroundColor(.green)
+                                        }
+                                        .buttonStyle(.plain)
+                                        
                                         Button {
                                             menuGameId = game.id
                                             showEditMenu = true
@@ -357,26 +379,24 @@ if let game = selectedGame {
                         }
                     }
                     .navigationTitle("游戏库")
-.toolbar {
-    ToolbarItem(placement: .navigationBarTrailing) {
-        HStack(spacing: 16) {
-            // 原有的导入按钮
-            if case .importing = importState {
-                ProgressView()
-                    .progressViewStyle(CircularProgressViewStyle())
-            } else {
-                Button(action: { showImporter = true }) {
-                    Image(systemName: "folder.badge.plus")
-                }
-            }
-                        // 设置按钮（新增）
-            Button(action: { showingSettings = true }) {
-                Image(systemName: "gear")
-                    .font(.title3)
-            }
-        }
-    }
-}
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            HStack(spacing: 16) {
+                                if case .importing = importState {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle())
+                                } else {
+                                    Button(action: { showImporter = true }) {
+                                        Image(systemName: "folder.badge.plus")
+                                    }
+                                }
+                                Button(action: { showingSettings = true }) {
+                                    Image(systemName: "gear")
+                                        .font(.title3)
+                                }
+                            }
+                        }
+                    }
                     .overlay {
                         if case .unzipping(let progress) = importState {
                             VStack(spacing: 16) {
@@ -453,6 +473,27 @@ if let game = selectedGame {
             }
             Button("取消", role: .cancel) { }
         }
+        .confirmationDialog("选择存档", isPresented: $showArchiveList, titleVisibility: .visible) {
+            ForEach(archiveURLs.indices, id: \.self) { index in
+                let item = archiveURLs[index]
+                let timeString = DateFormatter.localizedString(from: item.timestamp, dateStyle: .short, timeStyle: .short)
+                Button("存档 \(timeString)") {
+                    guard let gameId = archiveGameId,
+                          let game = games.first(where: { $0.id == gameId }) else { return }
+                    // 直接启动游戏并加载存档
+                    GameOverlayManager.shared.showGame(
+                        folderURL: getLocalGameURL(for: game),
+                        gameId: game.id,
+                        loadURL: item.url,
+                        onExit: {
+                            // 退出时不做额外操作
+                        }
+                    )
+                    updateLastPlayed(for: game.id)
+                }
+            }
+            Button("取消", role: .cancel) { }
+        }
         .sheet(isPresented: $showIconPicker) {
             ImagePicker(selectedImageData: { data in
                 guard let id = pickerGameId else { return }
@@ -465,8 +506,8 @@ if let game = selectedGame {
             loadGames()
         }
         .sheet(isPresented: $showingSettings) {
-    SettingsView()
-}
+            SettingsView()
+        }
     }
     
     // MARK: - 辅助函数
