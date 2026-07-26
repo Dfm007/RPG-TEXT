@@ -6,14 +6,12 @@ struct RPGWebView: UIViewRepresentable {
     @Binding var isLoading: Bool
     let onWebViewCreated: ((WKWebView) -> Void)?
 
-    // 主要初始化（保留）
     init(gamePath: URL, isLoading: Binding<Bool> = .constant(false), onWebViewCreated: ((WKWebView) -> Void)? = nil) {
         self.gamePath = gamePath
         self._isLoading = isLoading
         self.onWebViewCreated = onWebViewCreated
     }
 
-    // 专门匹配 GameViewController 中的调用（folderURL: + 尾随闭包）
     init(folderURL: URL, onWebViewCreated: ((WKWebView) -> Void)? = nil) {
         self.gamePath = folderURL
         self._isLoading = .constant(false)
@@ -28,9 +26,8 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "loadGameFile")
         contentController.add(context.coordinator, name: "bridgeReady")
 
-        // 注入桥接 JS（页面加载前）
         let bridgeScript = WKUserScript(
-            source: bridgeJavaScript(),
+            source: RPGWebView.bridgeJavaScript(),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         )
@@ -50,7 +47,6 @@ struct RPGWebView: UIViewRepresentable {
             context.coordinator.log("❌ index.html 不存在")
         }
 
-        // 回调 webView 实例
         DispatchQueue.main.async {
             self.onWebViewCreated?(webView)
         }
@@ -103,7 +99,7 @@ struct RPGWebView: UIViewRepresentable {
             case "saveGameFile":
                 handleSave(message: message)
             case "loadGameFile":
-                break // 暂不实现
+                break
             case "bridgeReady":
                 log("📨 Bridge 状态: \(message.body)")
             default:
@@ -133,8 +129,7 @@ struct RPGWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             log("🌐 页面加载完成")
 
-            // 重新注入桥接（应对游戏脚本晚加载）
-            let script = bridgeJavaScript()
+            let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
                     self.log("❌ 重新注入失败: \(error)")
@@ -143,7 +138,6 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
 
-            // 延迟1秒再注入一次
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 webView.evaluateJavaScript(script) { _, error in
                     if let error = error {
@@ -152,7 +146,6 @@ struct RPGWebView: UIViewRepresentable {
                         self.log("✅ 延迟注入成功")
                     }
                 }
-                // 检查 StorageManager 状态
                 let checkScript = """
                 (function() {
                     var status = '未定义';
@@ -177,8 +170,8 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - JavaScript 桥接代码
-    private func bridgeJavaScript() -> String {
+    // MARK: - JavaScript 桥接代码（静态方法）
+    static func bridgeJavaScript() -> String {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
