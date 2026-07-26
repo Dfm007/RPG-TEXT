@@ -12,84 +12,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 清理可能干扰的文件
-      - name: Clean up
+      # 1. 下载 ZIPFoundation 源码
+      - name: Download ZIPFoundation
         run: |
-          rm -rf *.xcodeproj || true
-          rm -rf .swiftpm || true
-          rm -rf DerivedData || true
-          rm -rf .build || true
+          git clone --depth 1 https://github.com/weichsel/ZIPFoundation.git /tmp/ZIPFoundation
+          # 将源码复制到项目目录下的 ZIPFoundation 文件夹
+          mkdir -p ZIPFoundation
+          cp -R /tmp/ZIPFoundation/Sources/ZIPFoundation/* ZIPFoundation/
 
-      # 2. 尝试使用 SPM 解析依赖
-      - name: Resolve dependencies (SPM)
+      # 2. 获取 iOS SDK 路径
+      - name: Get SDK path
+        id: sdk
         run: |
-          swift package resolve || echo "SPM resolve failed, will use manual download instead"
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
+          echo "SDKROOT=$SDK_PATH" >> $GITHUB_ENV
 
-      # 3. 如果 SPM 失败，手动下载 ZIPFoundation 源码
-      - name: Download ZIPFoundation (manual)
+      # 3. 编译所有 Swift 源文件（包括 ZIPFoundation）
+      - name: Compile Swift sources
         run: |
-          if [ ! -d ".build/checkouts/ZIPFoundation" ]; then
-            echo "SPM failed, downloading ZIPFoundation manually..."
-            git clone --depth 1 https://github.com/weichsel/ZIPFoundation.git /tmp/ZIPFoundation
-            # 将源码复制到项目中（创建一个 ZIPFoundation 目录）
-            mkdir -p App/Sources/AppProject/ZIPFoundation
-            cp -R /tmp/ZIPFoundation/Sources/ZIPFoundation/* App/Sources/AppProject/ZIPFoundation/
-          fi
+          mkdir -p build
+          # 获取所有 Swift 文件：项目源文件 + ZIPFoundation 源文件
+          find App/Sources/AppProject -name "*.swift" > sources.txt
+          find ZIPFoundation -name "*.swift" >> sources.txt
+          # 使用 swiftc 编译
+          swiftc \
+            -target arm64-apple-ios16.0 \
+            -sdk $SDK_PATH \
+            -emit-executable \
+            -module-name TEXT \
+            -o build/TEXT \
+            -framework UIKit \
+            -framework SwiftUI \
+            -framework WebKit \
+            -parse-as-library \
+            @sources.txt
 
-      # 4. 使用 SPM 生成 Xcode 项目
-      - name: Generate Xcode project
-        run: |
-          swift package generate-xcodeproj --output ./GeneratedProject || echo "SPM generate failed"
-
-      # 5. 如果 SPM 生成失败，使用 xcodebuild 直接构建（手动包含 ZIPFoundation）
-      - name: Build .app (unsigned)
-        run: |
-          if [ -d "./GeneratedProject/GeneratedProject.xcodeproj" ]; then
-            echo "使用 SPM 生成的 Xcode 项目构建..."
-            SCHEME=$(xcodebuild -list -project ./GeneratedProject/GeneratedProject.xcodeproj | grep -A 1 "Schemes:" | tail -n 1 | tr -d ' ')
-            xcodebuild build \
-              -project ./GeneratedProject/GeneratedProject.xcodeproj \
-              -scheme "$SCHEME" \
-              -configuration Release \
-              -sdk iphoneos \
-              -derivedDataPath ./DerivedData \
-              CODE_SIGN_IDENTITY="" \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGNING_ALLOWED=NO \
-              DEVELOPMENT_TEAM="" \
-              PROVISIONING_PROFILE_SPECIFIER="" \
-              IPHONEOS_DEPLOYMENT_TARGET=16.0
-          else
-            echo "SPM 生成失败，使用纯 swiftc 编译（已包含 ZIPFoundation 源码）..."
-            SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-            mkdir -p build
-            swiftc \
-              -target arm64-apple-ios16.0 \
-              -sdk $SDK_PATH \
-              -emit-executable \
-              -module-name TEXT \
-              -o build/TEXT \
-              App/Sources/AppProject/*.swift \
-              App/Sources/AppProject/ZIPFoundation/*.swift \
-              -framework UIKit \
-              -framework SwiftUI \
-              -framework WebKit \
-              -parse-as-library
-          fi
-
-      # 6. 创建 .app 包结构
+      # 4. 创建 .app 包结构
       - name: Create .app bundle
         run: |
-          if [ -d "./DerivedData" ]; then
-            APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
-            if [ -n "$APP_PATH" ]; then
-              mkdir -p Payload
-              cp -R "$APP_PATH" Payload/
-            else
-              echo "未找到 xcodebuild 生成的 .app，使用 swiftc 生成的 .app"
-              mkdir -p Payload/TEXT.app
-              cp build/TEXT Payload/TEXT.app/
-              cat > Payload/TEXT.app/Info.plist << 'EOF'
+          mkdir -p Payload/TEXT.app
+          cp build/TEXT Payload/TEXT.app/
+          
+          # 生成 Info.plist
+          cat > Payload/TEXT.app/Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -127,56 +93,13 @@ jobs:
           </dict>
           </plist>
           EOF
-            fi
-          else
-            mkdir -p Payload/TEXT.app
-            cp build/TEXT Payload/TEXT.app/
-            cat > Payload/TEXT.app/Info.plist << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
-              <key>CFBundleExecutable</key>
-              <string>TEXT</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.example.TEXT</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>TEXT</string>
-              <key>CFBundleDisplayName</key>
-              <string>TEXT</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>1.0</string>
-              <key>CFBundleVersion</key>
-              <string>1</string>
-              <key>LSRequiresIPhoneOS</key>
-              <true/>
-              <key>UIFileSharingEnabled</key>
-              <true/>
-              <key>LSSupportsOpeningDocumentsInPlace</key>
-              <true/>
-              <key>UISupportedInterfaceOrientations</key>
-              <array>
-                  <string>UIInterfaceOrientationPortrait</string>
-                  <string>UIInterfaceOrientationLandscapeLeft</string>
-                  <string>UIInterfaceOrientationLandscapeRight</string>
-              </array>
-          </dict>
-          </plist>
-          EOF
-          fi
 
-      # 7. 打包成 IPA
+      # 5. 打包成 IPA
       - name: Package IPA
         run: |
           zip -r TEXT.ipa Payload/
 
-      # 8. 上传 IPA
+      # 6. 上传 IPA
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
