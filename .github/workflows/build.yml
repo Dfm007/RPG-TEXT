@@ -12,82 +12,74 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 获取 iOS SDK 路径
-      - name: Get SDK path
-        id: sdk
+      # 1. 清理可能干扰的文件
+      - name: Clean up
         run: |
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
-          echo "SDKROOT=$SDK_PATH" >> $GITHUB_ENV
+          rm -rf *.xcodeproj || true
+          rm -rf .swiftpm || true
+          rm -rf DerivedData || true
+          rm -rf .build || true
 
-      # 编译所有 Swift 源文件
-      - name: Compile Swift sources
+      # 2. 解析 SPM 依赖（下载 ZIPFoundation）
+      - name: Resolve dependencies
         run: |
-          mkdir -p build
-          swiftc \
-            -target arm64-apple-ios16.0 \
-            -sdk $SDK_PATH \
-            -emit-executable \
-            -module-name TEXT \
-            -o build/TEXT \
-            App/Sources/AppProject/*.swift \
-            -framework UIKit \
-            -framework SwiftUI \
-            -framework WebKit \
-            -parse-as-library
+          swift package resolve
 
-      # 创建 .app 包结构
-      - name: Create .app bundle
+      # 3. 使用 SPM 生成 Xcode 项目
+      - name: Generate Xcode project
         run: |
-          mkdir -p Payload/TEXT.app
-          cp build/TEXT Payload/TEXT.app/
-          
-          # 生成 Info.plist
-          cat > Payload/TEXT.app/Info.plist << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
-              <key>CFBundleExecutable</key>
-              <string>TEXT</string>
-              <key>CFBundleIdentifier</key>
-              <string>com.example.TEXT</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>TEXT</string>
-              <key>CFBundleDisplayName</key>
-              <string>TEXT</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>1.0</string>
-              <key>CFBundleVersion</key>
-              <string>1</string>
-              <key>LSRequiresIPhoneOS</key>
-              <true/>
-              <key>UIFileSharingEnabled</key>
-              <true/>
-              <key>LSSupportsOpeningDocumentsInPlace</key>
-              <true/>
-              <key>UISupportedInterfaceOrientations</key>
-              <array>
-                  <string>UIInterfaceOrientationPortrait</string>
-                  <string>UIInterfaceOrientationLandscapeLeft</string>
-                  <string>UIInterfaceOrientationLandscapeRight</string>
-              </array>
-          </dict>
-          </plist>
-          EOF
+          swift package generate-xcodeproj --output ./GeneratedProject
 
-      # 打包成 IPA
+      # 4. 列出生成的 Scheme（用于调试，确认 Scheme 名称）
+      - name: List available schemes
+        run: |
+          echo "=== 生成的 Xcode 项目内容 ==="
+          ls -la ./GeneratedProject/
+          echo "=== 可用的 Scheme 列表 ==="
+          xcodebuild -list -project ./GeneratedProject/GeneratedProject.xcodeproj
+
+      # 5. 动态获取 Scheme 名称
+      - name: Get scheme name
+        id: get_scheme
+        run: |
+          SCHEME=$(xcodebuild -list -project ./GeneratedProject/GeneratedProject.xcodeproj | grep -A 1 "Schemes:" | tail -n 1 | tr -d ' ')
+          echo "检测到的 Scheme 名称: $SCHEME"
+          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+          echo "scheme=$SCHEME" >> $GITHUB_OUTPUT
+
+      # 6. 使用 xcodebuild 构建（包含 ZIPFoundation 依赖）
+      - name: Build .app (unsigned)
+        run: |
+          xcodebuild build \
+            -project ./GeneratedProject/GeneratedProject.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath ./DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0
+
+      # 7. 查找编译生成的 .app 并打包 IPA
       - name: Package IPA
         run: |
+          APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ 未找到编译生成的 .app 文件"
+            echo "尝试查找所有 .app 文件..."
+            find . -name "*.app" -type d
+            exit 1
+          fi
+          echo "✅ 找到 .app 路径：$APP_PATH"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
           zip -r TEXT.ipa Payload/
+          echo "✅ IPA 打包完成"
 
-      # 上传 IPA
+      # 8. 上传 IPA
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
