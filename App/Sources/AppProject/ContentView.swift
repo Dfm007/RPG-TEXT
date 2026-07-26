@@ -22,8 +22,8 @@ enum ImportState {
     case failed(String)
 }
 
-// MARK: - 强制横屏的 UIViewController（含桥接）
-class GameViewController: UIViewController, WKScriptMessageHandler {
+// MARK: - 强制横屏的 UIViewController（无桥接，无保存）
+class GameViewController: UIViewController {
     var folderURL: URL?
     var onExit: (() -> Void)?
     var gameId: UUID?
@@ -32,142 +32,16 @@ class GameViewController: UIViewController, WKScriptMessageHandler {
     private var gearButton: UIButton!
     private var webViewRef: WKWebView?
     
-    // MARK: - 桥接脚本（JavaScript）
-    private let bridgeScript = """
-        (function() {
-            if (window.__bridgeInitialized) return;
-            window.__bridgeInitialized = true;
-
-            // 桥接对象
-            const bridge = {
-                save: function(fileName, data) {
-                    return new Promise((resolve, reject) => {
-                        if (!window.webkit || !window.webkit.messageHandlers) {
-                            reject(new Error('原生桥接未就绪'));
-                            return;
-                        }
-                        let dataStr = typeof data === 'string' ? data : JSON.stringify(data);
-                        let base64 = btoa(unescape(encodeURIComponent(dataStr)));
-                        window.webkit.messageHandlers.save.postMessage({
-                            fileName: fileName,
-                            data: base64
-                        });
-                        resolve();
-                    });
-                },
-                load: function(fileName) {
-                    return new Promise((resolve, reject) => {
-                        if (!window.webkit || !window.webkit.messageHandlers) {
-                            reject(new Error('原生桥接未就绪'));
-                            return;
-                        }
-                        let callbackId = Date.now() + '_' + Math.random();
-                        window.webkit.messageHandlers.load.postMessage({
-                            fileName: fileName,
-                            callbackId: callbackId
-                        });
-                        let handler = function(event) {
-                            if (event.data && event.data.callbackId === callbackId) {
-                                window.removeEventListener('message', handler);
-                                if (event.data.error) {
-                                    reject(new Error(event.data.error));
-                                } else {
-                                    resolve(event.data.data);
-                                }
-                            }
-                        };
-                        window.addEventListener('message', handler);
-                    });
-                },
-                list: function() {
-                    return new Promise((resolve, reject) => {
-                        if (!window.webkit || !window.webkit.messageHandlers) {
-                            reject(new Error('原生桥接未就绪'));
-                            return;
-                        }
-                        let callbackId = Date.now() + '_list';
-                        window.webkit.messageHandlers.list.postMessage({
-                            callbackId: callbackId
-                        });
-                        let handler = function(event) {
-                            if (event.data && event.data.callbackId === callbackId) {
-                                window.removeEventListener('message', handler);
-                                if (event.data.error) {
-                                    reject(new Error(event.data.error));
-                                } else {
-                                    resolve(event.data.files);
-                                }
-                            }
-                        };
-                        window.addEventListener('message', handler);
-                    });
-                }
-            };
-
-            // 拦截 RPG Maker MV/MZ 的 StorageManager
-            if (typeof StorageManager !== 'undefined') {
-                let originalSave = StorageManager.save;
-                StorageManager.save = function() {
-                    let result = originalSave.apply(this, arguments);
-                    try {
-                        let key = 'RPG Maker';
-                        let data = localStorage.getItem(key);
-                        if (data) {
-                            bridge.save('save.rpgsave', data).catch(e => console.warn('桥接保存失败:', e));
-                        }
-                    } catch (e) {
-                        console.warn('桥接保存异常:', e);
-                    }
-                    return result;
-                };
-            }
-
-            // 暴露全局方法
-            window.restoreSaveFromNative = function(fileName) {
-                return bridge.load(fileName).then(data => {
-                    let key = 'RPG Maker';
-                    localStorage.setItem(key, data);
-                    // 触发游戏刷新
-                    if (typeof SceneManager !== 'undefined') {
-                        SceneManager._scene?.load?.(data);
-                    }
-                    return data;
-                }).catch(err => console.warn('从原生恢复存档失败:', err));
-            };
-            window.listNativeSaves = function() {
-                return bridge.list();
-            };
-
-            console.log('✅ 桥接脚本已注入');
-        })();
-        """
-    
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
         
         guard let folderURL = folderURL else { return }
         
-        // 1. 创建自定义配置
-        let config = WKWebViewConfiguration()
-        let userController = WKUserContentController()
-        userController.add(self, name: "save")
-        userController.add(self, name: "load")
-        userController.add(self, name: "list")
-        // 注入桥接脚本
-        let userScript = WKUserScript(source: bridgeScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-        userController.addUserScript(userScript)
-        config.userContentController = userController
-        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-        
-        // 2. 创建 RPGWebView（使用自定义配置）
-        let webView = RPGWebView(
-            folderURL: folderURL,
-            configuration: config,
-            onWebViewCreated: { [weak self] webView in
-                self?.webViewRef = webView
-            }
-        )
+        // 创建 WebView（使用标准配置）
+        let webView = RPGWebView(folderURL: folderURL) { [weak self] webView in
+            self?.webViewRef = webView
+        }
         let host = UIHostingController(rootView: webView)
         host.view.backgroundColor = .black
         addChild(host)
@@ -182,7 +56,7 @@ class GameViewController: UIViewController, WKScriptMessageHandler {
         host.didMove(toParent: self)
         hostingController = host
         
-        // 齿轮按钮（菜单）
+        // 齿轮按钮（仅返回主界面）
         gearButton = UIButton(type: .system)
         gearButton.setImage(UIImage(systemName: "gear"), for: .normal)
         gearButton.tintColor = .white
@@ -209,23 +83,19 @@ class GameViewController: UIViewController, WKScriptMessageHandler {
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // 横屏强制
+        // 强制横屏
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
     }
     
-    // MARK: - 齿轮菜单
+    // MARK: - 齿轮菜单（仅返回主界面）
     @objc private func gearButtonTapped() {
         let alertController = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
         
-        let saveAction = UIAlertAction(title: "保存游戏", style: .default) { [weak self] _ in
-            self?.saveGame()
-        }
         let exitAction = UIAlertAction(title: "返回主界面", style: .destructive) { [weak self] _ in
             self?.onExit?()
         }
         let cancelAction = UIAlertAction(title: "取消", style: .cancel)
         
-        alertController.addAction(saveAction)
         alertController.addAction(exitAction)
         alertController.addAction(cancelAction)
         
@@ -234,108 +104,6 @@ class GameViewController: UIViewController, WKScriptMessageHandler {
             popover.sourceRect = gearButton.bounds
         }
         present(alertController, animated: true)
-    }
-    
-    // MARK: - 保存游戏（手动触发）
-    @objc private func saveGame() {
-        guard let gameId = gameId, let folderURL = folderURL else {
-            showAlert(title: "保存失败", message: "无法获取游戏信息")
-            return
-        }
-        // 在游戏目录下创建 save 文件夹（如果不存在）
-        let saveDir = folderURL.appendingPathComponent("save")
-        if !FileManager.default.fileExists(atPath: saveDir.path) {
-            try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-        }
-        // 调用桥接的保存方法（通过 JS 触发游戏内保存）
-        webViewRef?.evaluateJavaScript("""
-            if (typeof StorageManager !== 'undefined' && StorageManager.save) {
-                StorageManager.save();
-                '保存请求已发送';
-            } else {
-                '未找到 StorageManager';
-            }
-        """) { [weak self] result, error in
-            if let error = error {
-                self?.showAlert(title: "保存失败", message: error.localizedDescription)
-            } else {
-                self?.showAlert(title: "✅ 保存成功", message: "存档已保存至 GameSaves 和游戏目录")
-            }
-        }
-    }
-    
-    // MARK: - WKScriptMessageHandler 处理
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let gameId = gameId, let folderURL = folderURL else { return }
-        let manager = SaveFileManager.shared
-        
-        switch message.name {
-        case "save":
-            guard let body = message.body as? [String: Any],
-                  let fileName = body["fileName"] as? String,
-                  let base64 = body["data"] as? String,
-                  let data = Data(base64Encoded: base64) else {
-                print("❌ 保存消息格式错误")
-                return
-            }
-            // 写入 GameSaves/
-            manager.writeSave(gameId: gameId, fileName: fileName, data: data)
-            // 同时写入游戏目录的 save/
-            let saveDir = folderURL.appendingPathComponent("save")
-            if !FileManager.default.fileExists(atPath: saveDir.path) {
-                try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            }
-            let fileURL = saveDir.appendingPathComponent(fileName)
-            try? data.write(to: fileURL)
-            print("✅ 桥接保存成功: \(fileName)")
-            
-        case "load":
-            guard let body = message.body as? [String: Any],
-                  let fileName = body["fileName"] as? String,
-                  let callbackId = body["callbackId"] as? String else {
-                return
-            }
-            // 先从 GameSaves 读取，若没有则从游戏目录 save/ 读取
-            var loadedData = manager.readSave(gameId: gameId, fileName: fileName)
-            if loadedData == nil {
-                let saveDir = folderURL.appendingPathComponent("save")
-                let fileURL = saveDir.appendingPathComponent(fileName)
-                loadedData = try? Data(contentsOf: fileURL)
-            }
-            if let data = loadedData {
-                let base64 = data.base64EncodedString()
-                let script = """
-                    window.dispatchEvent(new MessageEvent('message', {
-                        data: { callbackId: '\(callbackId)', data: '\(base64)' }
-                    }));
-                """
-                webViewRef?.evaluateJavaScript(script, completionHandler: nil)
-            } else {
-                let script = """
-                    window.dispatchEvent(new MessageEvent('message', {
-                        data: { callbackId: '\(callbackId)', error: '存档不存在' }
-                    }));
-                """
-                webViewRef?.evaluateJavaScript(script, completionHandler: nil)
-            }
-            
-        case "list":
-            guard let body = message.body as? [String: Any],
-                  let callbackId = body["callbackId"] as? String else {
-                return
-            }
-            let files = manager.listSaves(gameId: gameId)
-            let fileNames = files.map { $0.fileName }
-            let script = """
-                window.dispatchEvent(new MessageEvent('message', {
-                    data: { callbackId: '\(callbackId)', files: \(fileNames) }
-                }));
-            """
-            webViewRef?.evaluateJavaScript(script, completionHandler: nil)
-            
-        default:
-            break
-        }
     }
     
     // MARK: - 音频恢复
@@ -357,13 +125,6 @@ class GameViewController: UIViewController, WKScriptMessageHandler {
         webView.evaluateJavaScript(script, completionHandler: nil)
     }
     
-    // MARK: - 辅助方法
-    private func showAlert(title: String, message: String) {
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "确定", style: .default))
-        present(alert, animated: true)
-    }
-    
     // MARK: - 横屏设置
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         return .landscape
@@ -377,10 +138,6 @@ class GameViewController: UIViewController, WKScriptMessageHandler {
     
     deinit {
         NotificationCenter.default.removeObserver(self)
-        // 移除消息处理器
-        webViewRef?.configuration.userContentController.removeScriptMessageHandler(forName: "save")
-        webViewRef?.configuration.userContentController.removeScriptMessageHandler(forName: "load")
-        webViewRef?.configuration.userContentController.removeScriptMessageHandler(forName: "list")
         hostingController?.willMove(toParent: nil)
         hostingController?.view.removeFromSuperview()
         hostingController?.removeFromParent()
@@ -552,12 +309,32 @@ struct ContentView: View {
                                         
                                         Spacer()
                                         
-                                        // 读存档按钮
+                                        // 读存档按钮（扫描游戏目录下的 save/ 文件夹）
                                         Button {
                                             archiveGameId = game.id
-                                            archiveFiles = SaveFileManager.shared.listSaves(gameId: game.id)
+                                            let gameURL = getLocalGameURL(for: game)
+                                            let saveDir = gameURL.appendingPathComponent("save")
+                                            var files: [(fileName: String, fileSize: Int64, modificationDate: Date)] = []
+                                            if fileManager.fileExists(atPath: saveDir.path) {
+                                                do {
+                                                    let contents = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
+                                                    for url in contents {
+                                                        var isDir: ObjCBool = false
+                                                        if fileManager.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue {
+                                                            let attrs = try fileManager.attributesOfItem(atPath: url.path)
+                                                            let size = attrs[.size] as? Int64 ?? 0
+                                                            let modDate = attrs[.modificationDate] as? Date ?? Date()
+                                                            files.append((url.lastPathComponent, size, modDate))
+                                                        }
+                                                    }
+                                                    files.sort { $0.2 > $1.2 }
+                                                } catch {
+                                                    print("读取存档目录失败: \(error)")
+                                                }
+                                            }
+                                            archiveFiles = files
                                             if archiveFiles.isEmpty {
-                                                importError = "没有找到存档，请先保存游戏"
+                                                importError = "没有找到存档，请先在游戏内保存"
                                                 showErrorAlert = true
                                             } else {
                                                 showArchiveList = true
@@ -711,24 +488,17 @@ struct ContentView: View {
             ForEach(archiveFiles.indices, id: \.self) { index in
                 let file = archiveFiles[index]
                 let timeString = DateFormatter.localizedString(from: file.modificationDate, dateStyle: .short, timeStyle: .short)
-                let sizeString = SaveFileManager.shared.formattedFileSize(file.fileSize)
+                let sizeString = ByteCountFormatter.string(fromByteCount: file.fileSize, countStyle: .file)
                 Button("\(file.fileName) (\(sizeString) \(timeString))") {
                     guard let gameId = archiveGameId,
                           let game = games.first(where: { $0.id == gameId }) else { return }
-                    // 将存档复制到游戏目录
-                    let gameURL = getLocalGameURL(for: game)
-                    if SaveFileManager.shared.copySaveToGame(gameId: gameId, fileName: file.fileName, gameFolderURL: gameURL) {
-                        // 复制成功，启动游戏
-                        GameOverlayManager.shared.showGame(
-                            folderURL: gameURL,
-                            gameId: gameId,
-                            onExit: { }
-                        )
-                        updateLastPlayed(for: game.id)
-                    } else {
-                        importError = "复制存档失败"
-                        showErrorAlert = true
-                    }
+                    // 直接启动游戏，游戏引擎会读取 save/ 下的存档
+                    GameOverlayManager.shared.showGame(
+                        folderURL: getLocalGameURL(for: game),
+                        gameId: gameId,
+                        onExit: { }
+                    )
+                    updateLastPlayed(for: game.id)
                 }
             }
             Button("取消", role: .cancel) { }
