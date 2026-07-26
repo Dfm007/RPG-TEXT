@@ -12,11 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 下载 ZIPFoundation 源码并合并到项目源目录
-      - name: Download and merge ZIPFoundation
+      # 1. 下载 ZIPFoundation 并复制到项目源目录（固定版本 0.9.18）
+      - name: Download ZIPFoundation (v0.9.18)
         run: |
-          git clone --depth 1 https://github.com/weichsel/ZIPFoundation.git /tmp/ZIPFoundation
-          # 将 ZIPFoundation 的所有源码复制到项目源目录（这样它们会成为同一个模块的一部分）
+          git clone --depth 1 --branch 0.9.18 https://github.com/weichsel/ZIPFoundation.git /tmp/ZIPFoundation
           cp -R /tmp/ZIPFoundation/Sources/ZIPFoundation/* App/Sources/AppProject/
 
       # 2. 获取 iOS SDK 路径
@@ -27,13 +26,11 @@ jobs:
           echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
           echo "SDKROOT=$SDK_PATH" >> $GITHUB_ENV
 
-      # 3. 编译所有 Swift 源文件（项目源码 + ZIPFoundation）
+      # 3. 编译所有 Swift 源文件
       - name: Compile Swift sources
         run: |
           mkdir -p build
-          # 收集所有 .swift 文件
           find App/Sources/AppProject -name "*.swift" > sources.txt
-          # 使用 swiftc 编译
           swiftc \
             -target arm64-apple-ios16.0 \
             -sdk $SDK_PATH \
@@ -51,8 +48,6 @@ jobs:
         run: |
           mkdir -p Payload/TEXT.app
           cp build/TEXT Payload/TEXT.app/
-          
-          # 生成 Info.plist
           cat > Payload/TEXT.app/Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
