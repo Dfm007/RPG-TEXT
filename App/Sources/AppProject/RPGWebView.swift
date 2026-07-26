@@ -22,12 +22,12 @@ struct RPGWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
 
-        // 注册消息处理器
+        // 注册所有消息处理器
         contentController.add(context.coordinator, name: "saveGameFile")
         contentController.add(context.coordinator, name: "loadGameFile")
-        contentController.add(context.coordinator, name: "bridgeReady") // 新增：用于接收JS确认
+        contentController.add(context.coordinator, name: "bridgeReady")
 
-        // 注入桥接 JS（页面加载前）
+        // 注入初始桥接（页面加载前）
         let bridgeScript = WKUserScript(
             source: getBridgeJavaScript(),
             injectionTime: .atDocumentStart,
@@ -36,8 +36,6 @@ struct RPGWebView: UIViewRepresentable {
         contentController.addUserScript(bridgeScript)
 
         config.userContentController = contentController
-
-        // 允许从文件URL访问其他文件（解决加载data/目录的问题）
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -70,26 +68,18 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
 
-        override init() {
-            fatalError("use init(gamePath:)")
-        }
-
         init(gamePath: URL) {
             self.gamePath = gamePath
             self.saveDir = gamePath.appendingPathComponent("save")
-            // 日志文件放在 Documents 目录下
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            // 清空旧日志（可选）
-            // try? "".write(to: logFileURL, atomically: true, encoding: .utf8)
             log("===== Bridge 初始化 =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
 
-        // 写入日志（追加）
         func log(_ message: String) {
             let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .medium)
             let line = "[\(timestamp)] \(message)\n"
@@ -106,80 +96,84 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // 接收来自 JS 的消息
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             switch message.name {
             case "saveGameFile":
-                handleSaveGameFile(message: message)
+                handleSave(message: message)
             case "loadGameFile":
-                handleLoadGameFile(message: message)
+                handleLoad(message: message)
             case "bridgeReady":
-                handleBridgeReady(message: message)
+                log("📨 Bridge 状态: \(message.body)")
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
         }
 
-        // 保存存档
-        private func handleSaveGameFile(message: WKScriptMessage) {
-            log("📩 收到 saveGameFile 消息")
+        private func handleSave(message: WKScriptMessage) {
+            log("📩 收到 saveGameFile")
             guard let dict = message.body as? [String: Any],
                   let fileName = dict["fileName"] as? String,
                   let dataString = dict["data"] as? String else {
-                log("⚠️ 保存消息格式错误: \(message.body)")
+                log("⚠️ 格式错误: \(message.body)")
                 return
             }
             log("📄 文件名: \(fileName), 数据长度: \(dataString.count)")
             let fileURL = saveDir.appendingPathComponent(fileName)
             do {
                 try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
-                log("✅ 存档已写入: \(fileURL.lastPathComponent)")
+                log("✅ 写入成功: \(fileURL.lastPathComponent)")
             } catch {
-                log("❌ 写入存档失败: \(error)")
+                log("❌ 写入失败: \(error)")
             }
         }
 
-        private func handleLoadGameFile(message: WKScriptMessage) {
-            // 暂不实现
+        private func handleLoad(message: WKScriptMessage) {
+            // 预留
         }
 
-        // 接收 JS 桥接就绪确认
-        private func handleBridgeReady(message: WKScriptMessage) {
-            log("✅ JS 桥接已就绪: \(message.body)")
-        }
-
-        // 页面加载完成
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             log("🌐 页面加载完成")
-            // 注入额外的检测脚本，确认 StorageManager 是否被覆盖
-            let checkScript = """
-            (function() {
-                if (typeof StorageManager !== 'undefined' && StorageManager.save !== undefined) {
-                    var msg = 'StorageManager 存在，save 方法已覆盖';
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                        window.webkit.messageHandlers.bridgeReady.postMessage(msg);
-                    }
-                } else {
-                    var msg = 'StorageManager 不存在或 save 未覆盖';
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                        window.webkit.messageHandlers.bridgeReady.postMessage(msg);
-                    }
-                }
-            })();
-            """
-            webView.evaluateJavaScript(checkScript) { _, error in
+            // 关键：再次注入桥接，确保覆盖（可能游戏脚本晚于我们的注入加载）
+            let reinjectScript = getBridgeJavaScript()
+            webView.evaluateJavaScript(reinjectScript) { _, error in
                 if let error = error {
-                    self.log("❌ 检测脚本执行失败: \(error)")
+                    self.log("❌ 重新注入失败: \(error)")
+                } else {
+                    self.log("✅ 重新注入桥接成功")
                 }
+            }
+
+            // 延迟1秒再次确认（有些游戏脚本加载更晚）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                webView.evaluateJavaScript(reinjectScript) { _, error in
+                    if let error = error {
+                        self.log("❌ 延迟注入失败: \(error)")
+                    } else {
+                        self.log("✅ 延迟注入桥接成功")
+                    }
+                }
+                // 发送检测脚本，确认 StorageManager.save 是否已覆盖
+                let checkScript = """
+                (function() {
+                    var status = '未覆盖';
+                    if (typeof StorageManager !== 'undefined' && StorageManager.save) {
+                        status = '已覆盖';
+                    }
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
+                        window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager 状态: ' + status);
+                    }
+                })();
+                """
+                webView.evaluateJavaScript(checkScript, completionHandler: nil)
             }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            log("❌ 页面加载失败: \(error)")
+            log("❌ 导航失败: \(error)")
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            log("❌ 页面加载（临时）失败: \(error)")
+            log("❌ 临时加载失败: \(error)")
         }
     }
 
@@ -187,9 +181,9 @@ struct RPGWebView: UIViewRepresentable {
     private func getBridgeJavaScript() -> String {
         return """
         (function() {
-            // 先通知 Native 脚本已执行
+            // 通知 Native 脚本执行
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 脚本已注入开始');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始');
             }
 
             if (typeof StorageManager === 'undefined') {
@@ -197,10 +191,15 @@ struct RPGWebView: UIViewRepresentable {
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
                     window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager 未定义');
                 }
+                // 即使 StorageManager 未定义，也尝试保存原始引用（如果以后定义）
+                // 但我们没法重写，只能等待再次注入。
                 return;
             }
 
+            // 保存原始方法
             var originalSave = StorageManager.save;
+
+            // 重写 save
             StorageManager.save = function(savefile) {
                 var fileId = savefile.savefileId || 1;
                 var fileName = 'file' + fileId + '.rpgsave';
@@ -217,7 +216,7 @@ struct RPGWebView: UIViewRepresentable {
                         console.error('发送存档失败:', e);
                     }
                 } else {
-                    console.warn('Native bridge not available, fallback to localStorage');
+                    console.warn('Native bridge not available');
                 }
 
                 // 仍然调用原始方法
@@ -226,9 +225,9 @@ struct RPGWebView: UIViewRepresentable {
 
             // 通知 Native 桥接成功
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('桥接已成功覆盖 StorageManager.save');
+                window.webkit.messageHandlers.bridgeReady.postMessage('✅ StorageManager.save 已覆盖');
             }
-            console.log('✅ RPG Maker 文件桥接已注入 (保存拦截)');
+            console.log('✅ RPG Maker 文件桥接已注入');
         })();
         """
     }
