@@ -1,4 +1,5 @@
 import Foundation
+import WebKit
 
 class SaveFileManager {
     static let shared = SaveFileManager()
