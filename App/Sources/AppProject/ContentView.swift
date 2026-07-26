@@ -176,6 +176,10 @@ class GameOverlayManager {
     private var gameVC: GameViewController?
     
     func showGame(folderURL: URL, gameId: UUID, onExit: @escaping () -> Void) {
+        // 1️⃣ 锁定横屏
+        AppDelegate.orientationLock = .landscape
+        UIViewController.attemptRotationToDeviceOrientation()
+        
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
             return
         }
@@ -194,7 +198,7 @@ class GameOverlayManager {
         window.rootViewController = vc
         window.makeKeyAndVisible()
         
-        // 强制横屏
+        // 2️⃣ 再次强制横屏
         UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
         
@@ -207,10 +211,13 @@ class GameOverlayManager {
         gameWindow = nil
         gameVC = nil
         
+        // 3️⃣ 恢复竖屏
+        AppDelegate.orientationLock = .portrait
         UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
         UIViewController.attemptRotationToDeviceOrientation()
     }
 }
+
 
 // MARK: - 主界面
 struct ContentView: View {
