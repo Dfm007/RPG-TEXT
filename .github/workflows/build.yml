@@ -12,13 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 下载 ZIPFoundation 源码
-      - name: Download ZIPFoundation
+      # 1. 下载 ZIPFoundation 源码并合并到项目源目录
+      - name: Download and merge ZIPFoundation
         run: |
           git clone --depth 1 https://github.com/weichsel/ZIPFoundation.git /tmp/ZIPFoundation
-          # 将源码复制到项目目录下的 ZIPFoundation 文件夹
-          mkdir -p ZIPFoundation
-          cp -R /tmp/ZIPFoundation/Sources/ZIPFoundation/* ZIPFoundation/
+          # 将 ZIPFoundation 的所有源码复制到项目源目录（这样它们会成为同一个模块的一部分）
+          cp -R /tmp/ZIPFoundation/Sources/ZIPFoundation/* App/Sources/AppProject/
 
       # 2. 获取 iOS SDK 路径
       - name: Get SDK path
@@ -28,13 +27,12 @@ jobs:
           echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
           echo "SDKROOT=$SDK_PATH" >> $GITHUB_ENV
 
-      # 3. 编译所有 Swift 源文件（包括 ZIPFoundation）
+      # 3. 编译所有 Swift 源文件（项目源码 + ZIPFoundation）
       - name: Compile Swift sources
         run: |
           mkdir -p build
-          # 获取所有 Swift 文件：项目源文件 + ZIPFoundation 源文件
+          # 收集所有 .swift 文件
           find App/Sources/AppProject -name "*.swift" > sources.txt
-          find ZIPFoundation -name "*.swift" >> sources.txt
           # 使用 swiftc 编译
           swiftc \
             -target arm64-apple-ios16.0 \
