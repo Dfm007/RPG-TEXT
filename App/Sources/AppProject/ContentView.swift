@@ -493,24 +493,7 @@ struct ContentView: View {
                     } else {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 12) {
-                                // 最近游玩
-                                if !recentGames.isEmpty {
-                                    Text("最近游玩")
-                                        .font(.headline)
-                                        .padding(.horizontal, 20)
-                                        .padding(.top, 4)
-                                    
-                                    ForEach(recentGames) { game in
-                                        gameRow(for: game)
-                                            .padding(.horizontal, 20)
-                                    }
-                                    
-                                    if games.count > 3 {
-                                        Divider()
-                                            .padding(.horizontal, 20)
-                                            .padding(.vertical, 8)
-                                    }
-                                }
+
                                 
                                 // 全部游戏
                                 if !filteredGames.isEmpty {
@@ -533,42 +516,50 @@ struct ContentView: View {
                     Spacer()
                 }
                 .navigationBarHidden(true)
-                .overlay(alignment: .bottom) {
-                    // 底部按钮
-                    HStack(spacing: 20) {
-                        Button {
-                            showImporter = true
-                        } label: {
-                            HStack {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.title3)
-                                Text("添加游戏")
-                                    .fontWeight(.medium)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(Color.blue)
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
-                        }
-                        
-                        Button {
-                            showingSettings = true
-                        } label: {
-                            Image(systemName: "gear")
-                                .font(.title2)
-                                .frame(width: 50, height: 50)
-                                .background(Color(.systemGray5))
-                                .cornerRadius(12)
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
-                    .background(
-                        Color(.systemBackground)
-                            .shadow(radius: 4)
-                    )
-                }
+ .overlay(alignment: .bottom) {
+    // 底部按钮 - 改为「游戏」和「设置」两个标签按钮
+    HStack(spacing: 30) {
+        Button {
+            // 当前就在游戏列表，无需操作，或可添加滚动到顶部
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: "gamecontroller")
+                    .font(.title2)
+                Text("游戏")
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(Color.blue.opacity(0.15))
+            .foregroundColor(.blue)
+            .cornerRadius(12)
+        }
+        
+        Button {
+            showingSettings = true
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: "gear")
+                    .font(.title2)
+                Text("设置")
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(Color(.systemGray5))
+            .foregroundColor(.primary)
+            .cornerRadius(12)
+        }
+    }
+    .padding(.horizontal, 20)
+    .padding(.vertical, 12)
+    .background(
+        Color(.systemBackground)
+            .shadow(color: Color.black.opacity(0.08), radius: 4, y: -2)
+    )
+}
                 .overlay {
                     if case .unzipping(let progress) = importState {
                         VStack(spacing: 16) {
