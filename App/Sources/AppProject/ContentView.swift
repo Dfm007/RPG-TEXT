@@ -381,33 +381,35 @@ struct ArchiveListView: View {
     }
 }
 
-// MARK: - 主界面（新样式）
+// MARK: - 主界面
 struct ContentView: View {
+    // 游戏数据
     @State private var games: [GameItem] = []
     @State private var selectedGame: GameItem?
     @State private var importError: String?
     @State private var showErrorAlert = false
-    @State private var showingSettings = false
     @State private var importState: ImportState = .idle
     @State private var showImporter = false
     @State private var searchText = ""
     
+    // 编辑相关
     @State private var editingGameId: UUID?
     @State private var editingName: String = ""
     @State private var showRenameAlert = false
-    
     @State private var showEditMenu = false
     @State private var menuGameId: UUID?
-    
     @State private var showIconPicker = false
     @State private var pickerGameId: UUID?
-    
     @State private var refreshID = UUID()
     
+    // 存档列表
     @State private var showArchiveSheet = false
     @State private var archiveGameId: UUID?
     @State private var archiveGameName: String = ""
     @State private var archiveGameURL: URL?
+    
+    // 当前页面控制
+    @State private var currentTab: String = "games"
     
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
@@ -419,16 +421,6 @@ struct ContentView: View {
         } else {
             return games.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
         }
-    }
-    
-    // 最近游玩（按 lastPlayed 排序，取前3）
-    private var recentGames: [GameItem] {
-        let sorted = games.sorted { (a, b) in
-            guard let dateA = a.lastPlayed else { return false }
-            guard let dateB = b.lastPlayed else { return true }
-            return dateA > dateB
-        }
-        return Array(sorted.prefix(3))
     }
     
     var body: some View {
@@ -449,138 +441,16 @@ struct ContentView: View {
                     }
                     .ignoresSafeArea()
             } else {
-                VStack(spacing: 0) {
-                    // 顶部标题
-                    HStack {
-                        Text("我的游戏")
-                            .font(.largeTitle)
-                            .fontWeight(.bold)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 12)
-                    .padding(.bottom, 8)
-                    
-                    // 搜索框
-                    HStack {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundColor(.gray)
-                        TextField("搜索游戏", text: $searchText)
-                            .textFieldStyle(.plain)
-                    }
-                    .padding(10)
-                    .background(Color(.systemGray6))
-                    .cornerRadius(10)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 16)
-                    
-                    if games.isEmpty {
-                        // 空状态
-                        VStack(spacing: 20) {
-                            Spacer()
-                            Image(systemName: "gamecontroller")
-                                .font(.system(size: 60))
-                                .foregroundColor(.gray)
-                            Text("0个游戏")
-                                .font(.title2)
-                                .foregroundColor(.gray)
-                            Text("暂无游戏")
-                                .font(.headline)
-                                .foregroundColor(.gray)
-                            Spacer()
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // 主容器：根据 currentTab 切换视图
+                Group {
+                    if currentTab == "games" {
+                        gamesView
                     } else {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 12) {
-
-                                
-                                // 全部游戏
-                                if !filteredGames.isEmpty {
-                                    if !recentGames.isEmpty {
-                                        Text("全部游戏")
-                                            .font(.headline)
-                                            .padding(.horizontal, 20)
-                                    }
-                                    
-                                    ForEach(filteredGames) { game in
-                                        gameRow(for: game)
-                                            .padding(.horizontal, 20)
-                                    }
-                                }
-                            }
-                            .padding(.bottom, 80)
-                        }
+                        settingsView
                     }
-                    
-                    Spacer()
                 }
-                .navigationBarHidden(true)
- .overlay(alignment: .bottom) {
-    // 底部按钮 - 改为「游戏」和「设置」两个标签按钮
-    HStack(spacing: 30) {
-        Button {
-            // 当前就在游戏列表，无需操作，或可添加滚动到顶部
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: "gamecontroller")
-                    .font(.title2)
-                Text("游戏")
-                    .font(.caption)
-                    .fontWeight(.medium)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(Color.blue.opacity(0.15))
-            .foregroundColor(.blue)
-            .cornerRadius(12)
-        }
-        
-        Button {
-            showingSettings = true
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: "gear")
-                    .font(.title2)
-                Text("设置")
-                    .font(.caption)
-                    .fontWeight(.medium)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(Color(.systemGray5))
-            .foregroundColor(.primary)
-            .cornerRadius(12)
-        }
-    }
-    .padding(.horizontal, 20)
-    .padding(.vertical, 12)
-    .background(
-        Color(.systemBackground)
-            .shadow(color: Color.black.opacity(0.08), radius: 4, y: -2)
-    )
-}
-                .overlay {
-                    if case .unzipping(let progress) = importState {
-                        VStack(spacing: 16) {
-                            ProgressView(value: progress, total: 1.0)
-                                .progressViewStyle(.linear)
-                                .frame(width: 200)
-                            Text("解压中... \(Int(progress * 100))%")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(24)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(Color(.systemBackground))
-                                .shadow(radius: 10)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
-                        )
-                    }
+                .overlay(alignment: .bottom) {
+                    customTabBar
                 }
             }
         }
@@ -648,15 +518,132 @@ struct ContentView: View {
                 refreshID = UUID()
             })
         }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
-        }
         .onAppear {
             loadGames()
         }
+        .overlay {
+            if case .unzipping(let progress) = importState {
+                VStack(spacing: 16) {
+                    ProgressView(value: progress, total: 1.0)
+                        .progressViewStyle(.linear)
+                        .frame(width: 200)
+                    Text("解压中... \(Int(progress * 100))%")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(24)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color(.systemBackground))
+                        .shadow(radius: 10)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.gray.opacity(0.2), lineWidth: 0.5)
+                )
+            }
+        }
     }
     
-    // MARK: - 游戏行视图
+    // MARK: - 游戏列表视图
+    private var gamesView: some View {
+        VStack(spacing: 0) {
+            // 顶部标题栏（含加号按钮）
+            HStack {
+                Text("我的游戏")
+                    .font(.largeTitle)
+                    .fontWeight(.bold)
+                Spacer()
+                // 加号按钮（导入游戏）
+                Button {
+                    showImporter = true
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+            
+            // 搜索框
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.gray)
+                TextField("搜索游戏", text: $searchText)
+                    .textFieldStyle(.plain)
+            }
+            .padding(10)
+            .background(Color(.systemGray6))
+            .cornerRadius(10)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
+            
+            // 游戏列表
+            if games.isEmpty {
+                VStack(spacing: 20) {
+                    Spacer()
+                    Image(systemName: "gamecontroller")
+                        .font(.system(size: 60))
+                        .foregroundColor(.gray)
+                    Text("0个游戏")
+                        .font(.title2)
+                        .foregroundColor(.gray)
+                    Text("暂无游戏")
+                        .font(.headline)
+                        .foregroundColor(.gray)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !filteredGames.isEmpty {
+                            Text("全部游戏")
+                                .font(.headline)
+                                .padding(.horizontal, 20)
+                                .padding(.top, 4)
+                            
+                            ForEach(filteredGames) { game in
+                                gameRow(for: game)
+                                    .padding(.horizontal, 20)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 80) // 为底部Tab留空间
+                }
+            }
+        }
+        .navigationBarHidden(true)
+    }
+    
+    // MARK: - 设置视图（全屏）
+    private var settingsView: some View {
+        VStack {
+            HStack {
+                Text("设置")
+                    .font(.largeTitle)
+                    .fontWeight(.bold)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            
+            Spacer()
+            
+            // 设置内容（示例）
+            Text("设置界面")
+                .font(.title2)
+                .foregroundColor(.secondary)
+            
+            Spacer()
+        }
+        .navigationBarHidden(true)
+    }
+    
+    // MARK: - 游戏行
     @ViewBuilder
     private func gameRow(for game: GameItem) -> some View {
         HStack(spacing: 12) {
@@ -736,6 +723,50 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
     
+    // MARK: - 自定义底部 Tab 栏（完全融合）
+    private var customTabBar: some View {
+        HStack(spacing: 0) {
+            // 游戏按钮
+            Button {
+                withAnimation { currentTab = "games" }
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "gamecontroller")
+                        .font(.title2)
+                    Text("游戏")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .foregroundColor(currentTab == "games" ? .blue : .gray)
+                .background(Color.clear)
+            }
+            .buttonStyle(.plain)
+            
+            // 设置按钮
+            Button {
+                withAnimation { currentTab = "settings" }
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "gear")
+                        .font(.title2)
+                    Text("设置")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .foregroundColor(currentTab == "settings" ? .blue : .gray)
+                .background(Color.clear)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(Color.clear) // 完全透明
+    }
+    
     // MARK: - 辅助函数
     private func getLocalGameURL(for game: GameItem) -> URL {
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -752,7 +783,6 @@ struct ContentView: View {
         let gameURL = getLocalGameURL(for: game)
         let iconDir = gameURL.appendingPathComponent("icon")
         let possibleExtensions = ["png", "jpg", "jpeg", "icon"]
-        
         for ext in possibleExtensions {
             let fileURL = iconDir.appendingPathExtension(ext)
             if fileManager.fileExists(atPath: fileURL.path) {
