@@ -740,7 +740,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .foregroundColor(currentTab == "games" ? .blue : .gray)
-                .padding(.bottom, 10)   // ⬅️ 增加底部间距，数值可调（如 10、16、20）
+                .padding(.bottom, 0)   // ⬅️ 增加底部间距，数值可调（如 10、16、20）
                 .background(Color.clear)
             }
             .buttonStyle(.plain)
