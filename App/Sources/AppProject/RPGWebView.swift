@@ -25,7 +25,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "bridgeReady")
         contentController.add(context.coordinator, name: "preloadArchives")
         contentController.add(context.coordinator, name: "debugLog")
-        contentController.add(context.coordinator, name: "saveData")  // 新增
+        contentController.add(context.coordinator, name: "saveData")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -67,7 +67,7 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var saveDetectTimer: Timer?
+        private var extractedFileIds: Set<Int> = []
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -76,7 +76,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (内存提取最终版) =====")
+            log("===== Bridge 初始化 (主动提取最终版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -112,7 +112,7 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - ⭐ 核心：接收游戏保存数据
+        // MARK: - 接收保存数据
         private func handleSaveData(message: WKScriptMessage) {
             guard let dict = message.body as? [String: Any],
                   let fileId = dict["fileId"] as? Int,
@@ -130,12 +130,90 @@ struct RPGWebView: UIViewRepresentable {
                 do {
                     try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
                     log("✅ 保存成功: \(fileName)")
+                    extractedFileIds.insert(fileId)
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
             } else {
                 log("⚠️ 数据过小 (\(dataString.count) 字节)")
             }
+        }
+
+        // MARK: - ⭐ 核心：主动从游戏提取数据
+        private func extractArchive(fileId: Int) {
+            guard let webView = webView else {
+                log("❌ webView 不可用")
+                return
+            }
+            
+            log("🔍 主动提取存档, fileId: \(fileId)")
+            
+            let script = """
+            (function() {
+                var fileId = \(fileId);
+                var data = null;
+                var source = '';
+                
+                // 方式1: 从 StorageManager.load 获取
+                try {
+                    if (typeof StorageManager !== 'undefined' && StorageManager.load) {
+                        var result = StorageManager.load(fileId);
+                        if (result !== null && result !== undefined) {
+                            data = JSON.stringify(result);
+                            source = 'StorageManager.load';
+                            console.log('✅ 从 StorageManager.load 获取数据，长度: ' + data.length);
+                        }
+                    }
+                } catch(e) {}
+                
+                // 方式2: 如果方式1失败，尝试从 window.saveData 获取
+                if (!data || data.length < 100) {
+                    try {
+                        if (window.saveData !== undefined) {
+                            data = JSON.stringify(window.saveData);
+                            source = 'window.saveData';
+                            console.log('✅ 从 window.saveData 获取数据，长度: ' + data.length);
+                        }
+                    } catch(e) {}
+                }
+                
+                // 方式3: 如果还失败，尝试从 window._saveData 获取
+                if (!data || data.length < 100) {
+                    try {
+                        if (window._saveData !== undefined) {
+                            data = JSON.stringify(window._saveData);
+                            source = 'window._saveData';
+                            console.log('✅ 从 window._saveData 获取数据，长度: ' + data.length);
+                        }
+                    } catch(e) {}
+                }
+                
+                // 方式4: 最后尝试从 localStorage 获取
+                if (!data || data.length < 100) {
+                    try {
+                        var key = 'RPG File' + fileId;
+                        var value = localStorage.getItem(key);
+                        if (value && value.length > 100) {
+                            data = value;
+                            source = 'localStorage';
+                            console.log('✅ 从 localStorage 获取数据，长度: ' + data.length);
+                        }
+                    } catch(e) {}
+                }
+                
+                // 发送给 Native
+                if (data && data.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                    window.webkit.messageHandlers.saveData.postMessage({
+                        fileId: fileId,
+                        data: data
+                    });
+                    console.log('📤 数据已发送 (来源: ' + source + ')，长度: ' + data.length);
+                } else {
+                    console.warn('⚠️ 未找到存档数据，尝试的数据源: ' + source);
+                }
+            })();
+            """
+            webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
         // MARK: - 预加载存档
@@ -197,7 +275,7 @@ struct RPGWebView: UIViewRepresentable {
             self.webView = webView
             log("🌐 页面加载完成")
 
-            // 注入完整的桥接脚本
+            // 注入桥接
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -218,6 +296,13 @@ struct RPGWebView: UIViewRepresentable {
                 """
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
             }
+            
+            // ⭐ 延迟 3 秒后主动提取存档（用于恢复存档）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                self.extractArchive(fileId: 1)
+                self.extractArchive(fileId: 2)
+                self.extractArchive(fileId: 3)
+            }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -234,106 +319,56 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (主动提取)');
             }
 
             // ==========================================
-            // ⭐ 核心：拦截所有可能的保存方法
+            // 拦截 StorageManager.save
             // ==========================================
-            
-            // 1. 拦截 StorageManager.save
             if (typeof StorageManager !== 'undefined' && StorageManager.save) {
                 var originalSave = StorageManager.save;
                 StorageManager.save = function(savefile) {
                     console.log('📤 StorageManager.save 被调用');
-                    
-                    // 先调用原始方法
                     var result = originalSave.call(this, savefile);
                     
-                    // 获取数据
+                    // 保存后主动提取数据
                     var fileId = savefile.savefileId || savefile.id || 1;
-                    try {
-                        var data = JSON.stringify(savefile);
-                        if (data && data.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                            window.webkit.messageHandlers.saveData.postMessage({
-                                fileId: fileId,
-                                data: data
-                            });
-                            console.log('📤 StorageManager.save 数据已发送，长度: ' + data.length);
+                    setTimeout(function() {
+                        try {
+                            if (StorageManager.load) {
+                                var data = StorageManager.load(fileId);
+                                if (data) {
+                                    var json = JSON.stringify(data);
+                                    if (json && json.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                        window.webkit.messageHandlers.saveData.postMessage({
+                                            fileId: fileId,
+                                            data: json
+                                        });
+                                        console.log('📤 StorageManager.save 后提取数据成功，长度: ' + json.length);
+                                    }
+                                }
+                            }
+                        } catch(e) {
+                            console.error('提取数据失败:', e);
                         }
-                    } catch(e) {
-                        console.error('StorageManager.save 捕获失败:', e);
-                    }
+                    }, 500);
                     
                     return result;
                 };
             }
 
-            // 2. 拦截 localStorage.setItem
+            // ==========================================
+            // 拦截 localStorage.setItem
+            // ==========================================
             var originalSetItem = localStorage.setItem;
             localStorage.setItem = function(key, value) {
                 originalSetItem.call(this, key, value);
-                
                 if (key && key.indexOf('RPG File') === 0) {
                     console.log('📤 localStorage.setItem: ' + key + ', 长度: ' + (value ? value.length : 0));
-                    
-                    // 如果数据长度大于 100，直接发送
-                    if (value && value.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                        var fileId = parseInt(key.replace('RPG File', ''));
-                        if (!isNaN(fileId)) {
-                            window.webkit.messageHandlers.saveData.postMessage({
-                                fileId: fileId,
-                                data: value
-                            });
-                            console.log('📤 localStorage 数据已发送，长度: ' + value.length);
-                        }
-                    }
                 }
             };
 
-            // 3. 拦截可能存在的 DataManager
-            if (typeof DataManager !== 'undefined') {
-                if (DataManager.save) {
-                    var originalDataSave = DataManager.save;
-                    DataManager.save = function(data) {
-                        console.log('📤 DataManager.save 被调用');
-                        var result = originalDataSave.call(this, data);
-                        try {
-                            var jsonData = JSON.stringify(data);
-                            if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                                window.webkit.messageHandlers.saveData.postMessage({
-                                    fileId: 1,
-                                    data: jsonData
-                                });
-                            }
-                        } catch(e) {}
-                        return result;
-                    };
-                }
-            }
-
-            // 4. 拦截可能存在的 FileManager
-            if (typeof FileManager !== 'undefined') {
-                if (FileManager.save) {
-                    var originalFileSave = FileManager.save;
-                    FileManager.save = function(data) {
-                        console.log('📤 FileManager.save 被调用');
-                        var result = originalFileSave.call(this, data);
-                        try {
-                            var jsonData = JSON.stringify(data);
-                            if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                                window.webkit.messageHandlers.saveData.postMessage({
-                                    fileId: 1,
-                                    data: jsonData
-                                });
-                            }
-                        } catch(e) {}
-                        return result;
-                    };
-                }
-            }
-
-            console.log('✅ 桥接注入完成 - 内存提取最终版');
+            console.log('✅ 桥接注入完成 - 主动提取版');
         })();
         """
     }
