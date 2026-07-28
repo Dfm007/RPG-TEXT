@@ -25,6 +25,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "bridgeReady")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
+        contentController.add(context.coordinator, name: "restoreArchive")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -66,7 +67,6 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var hasLoadedSave = false
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -75,7 +75,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (最小干预版) =====")
+            log("===== Bridge 初始化 (手动恢复版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -104,6 +104,8 @@ struct RPGWebView: UIViewRepresentable {
                 log("🐛 \(message.body)")
             case "saveData":
                 handleSaveData(message: message)
+            case "restoreArchive":
+                handleRestoreArchive()
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -127,7 +129,6 @@ struct RPGWebView: UIViewRepresentable {
                 do {
                     try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
                     log("✅ 保存成功: \(fileName)")
-                    hasLoadedSave = true
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
@@ -136,11 +137,19 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - ⭐ 构建预加载脚本（只写入 localStorage，不碰 StorageManager._data）
-        func buildPreloadScript() -> String {
+        // MARK: - ⭐ 手动恢复存档（由用户触发）
+        private func handleRestoreArchive() {
+            log("📦 手动恢复存档...")
+            
+            guard let webView = webView else {
+                log("❌ webView 不可用")
+                return
+            }
+            
             let fileManager = FileManager.default
             guard fileManager.fileExists(atPath: saveDir.path) else {
-                return ""
+                log("📭 save 目录不存在")
+                return
             }
             
             do {
@@ -157,18 +166,19 @@ struct RPGWebView: UIViewRepresentable {
                                 let base64Data = data.data(using: .utf8)?.base64EncodedString() ?? ""
                                 let key = "RPG File\(fileId)"
                                 
-                                // ⭐ 只写入 localStorage，不碰 StorageManager._data
                                 let script = """
-                                try {
-                                    var decoded = atob('\(base64Data)');
-                                    localStorage.setItem('\(key)', decoded);
-                                    console.log('✅ 预加载: \(key)');
-                                } catch(e) {
-                                    console.error('预加载失败:', e);
-                                }
+                                (function() {
+                                    try {
+                                        var decoded = atob('\(base64Data)');
+                                        localStorage.setItem('\(key)', decoded);
+                                        console.log('✅ 恢复: \(key)');
+                                    } catch(e) {
+                                        console.error('恢复失败:', e);
+                                    }
+                                })();
                                 """
                                 scripts.append(script)
-                                log("📄 预加载脚本: \(key) (\(data.count) 字节)")
+                                log("📄 恢复存档: file\(fileId) (\(data.count) 字节)")
                             } catch {
                                 log("⚠️ 读取文件失败: \(fileName)")
                             }
@@ -176,10 +186,38 @@ struct RPGWebView: UIViewRepresentable {
                     }
                 }
                 
-                return scripts.joined(separator: " ")
+                if !scripts.isEmpty {
+                    let combinedScript = scripts.joined(separator: " ")
+                    webView.evaluateJavaScript(combinedScript) { _, error in
+                        if let error = error {
+                            self.log("❌ 恢复失败: \(error)")
+                        } else {
+                            self.log("✅ 恢复完成 (\(scripts.count) 个存档)")
+                            
+                            // 刷新游戏界面
+                            let refreshScript = """
+                            (function() {
+                                try {
+                                    if (typeof SceneManager !== 'undefined' && SceneManager._scene) {
+                                        var scene = SceneManager._scene;
+                                        if (scene && scene.refresh) {
+                                            scene.refresh();
+                                        }
+                                    }
+                                    if (typeof DataManager !== 'undefined') {
+                                        DataManager.makeSaveContents();
+                                    }
+                                } catch(e) {}
+                            })();
+                            """
+                            webView.evaluateJavaScript(refreshScript, completionHandler: nil)
+                        }
+                    }
+                } else {
+                    log("📭 没有找到存档文件")
+                }
             } catch {
                 log("❌ 扫描存档目录失败: \(error)")
-                return ""
             }
         }
 
@@ -187,44 +225,12 @@ struct RPGWebView: UIViewRepresentable {
             self.webView = webView
             log("🌐 页面加载完成")
 
-            // 注入桥接
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
                     self.log("❌ 注入失败: \(error)")
                 } else {
                     self.log("✅ 桥接注入成功")
-                }
-            }
-            
-            // ⭐ 延迟 1 秒后预加载存档（只写 localStorage）
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                let preloadScript = self.buildPreloadScript()
-                if !preloadScript.isEmpty {
-                    self.webView?.evaluateJavaScript(preloadScript) { _, error in
-                        if let error = error {
-                            self.log("❌ 预加载失败: \(error)")
-                        } else {
-                            self.log("✅ 预加载完成")
-                            
-                            // 验证 localStorage
-                            let verifyScript = """
-                            (function() {
-                                var keys = [];
-                                for (var i = 0; i < localStorage.length; i++) {
-                                    var key = localStorage.key(i);
-                                    if (key && key.indexOf('RPG File') === 0) {
-                                        keys.push(key + ':' + localStorage.getItem(key).length);
-                                    }
-                                }
-                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
-                                    window.webkit.messageHandlers.debugLog.postMessage('localStorage 验证: ' + keys.join(', '));
-                                }
-                            })();
-                            """
-                            self.webView?.evaluateJavaScript(verifyScript, completionHandler: nil)
-                        }
-                    }
                 }
             }
         }
@@ -238,25 +244,20 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - JavaScript 桥接（最小干预）
+    // MARK: - JavaScript 桥接
     private static func bridgeJavaScript() -> String {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (最小干预版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (手动恢复版)');
             }
 
-            // ==========================================
-            // 只拦截 StorageManager.save（最小干预）
-            // ==========================================
             if (typeof StorageManager !== 'undefined') {
                 var originalSave = StorageManager.save;
                 StorageManager.save = function(savefile) {
-                    // 先执行原始保存
                     var result = originalSave.call(this, savefile);
                     var fileId = savefile.savefileId || savefile.id || 1;
                     
-                    // 延迟从 localStorage 读取数据并发送给 Native
                     setTimeout(function() {
                         try {
                             var key = 'RPG File' + fileId;
@@ -279,7 +280,8 @@ struct RPGWebView: UIViewRepresentable {
                 };
             }
 
-            console.log('✅ 最小干预版已启动');
+            console.log('✅ 手动恢复版已启动');
+            console.log('💡 在设置中点击「恢复存档」来恢复存档');
         })();
         """
     }
