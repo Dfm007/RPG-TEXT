@@ -25,17 +25,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "bridgeReady")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
-
-        let preloadScript = context.coordinator.buildPreloadScript()
-        if !preloadScript.isEmpty {
-            let preloadUserScript = WKUserScript(
-                source: preloadScript,
-                injectionTime: .atDocumentStart,
-                forMainFrameOnly: false
-            )
-            contentController.addUserScript(preloadUserScript)
-            context.coordinator.log("📦 StorageManager 预加载脚本已注入")
-        }
+        contentController.add(context.coordinator, name: "injectData")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -77,6 +67,7 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
+        private var pendingData: [(fileId: Int, data: String)] = []
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -85,9 +76,12 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (StorageManager直接注入版) =====")
+            log("===== Bridge 初始化 (延迟注入版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
+            
+            // 预加载数据到内存
+            loadPendingData()
         }
 
         func log(_ message: String) {
@@ -114,6 +108,8 @@ struct RPGWebView: UIViewRepresentable {
                 log("🐛 \(message.body)")
             case "saveData":
                 handleSaveData(message: message)
+            case "injectData":
+                handleInjectData()
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -136,6 +132,8 @@ struct RPGWebView: UIViewRepresentable {
                 do {
                     try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
                     log("✅ 保存成功: \(fileName)")
+                    // 更新待注入数据
+                    pendingData.append((fileId, dataString))
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
@@ -144,17 +142,16 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - ⭐ 构建直接注入 StorageManager._data 的脚本
-        func buildPreloadScript() -> String {
+        // MARK: - 加载待注入数据
+        private func loadPendingData() {
             let fileManager = FileManager.default
             guard fileManager.fileExists(atPath: saveDir.path) else {
-                return ""
+                log("📭 save 目录不存在")
+                return
             }
             
             do {
                 let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
-                var scripts: [String] = []
-                
                 for fileURL in files {
                     let fileName = fileURL.lastPathComponent
                     if fileName.hasPrefix("file") && fileName.hasSuffix(".rpgsave") {
@@ -162,53 +159,107 @@ struct RPGWebView: UIViewRepresentable {
                         if let fileId = Int(fileIdStr) {
                             do {
                                 let data = try String(contentsOf: fileURL, encoding: .utf8)
-                                let base64Data = data.data(using: .utf8)?.base64EncodedString() ?? ""
-                                let key = "RPG File\(fileId)"
-                                
-                                // ⭐ 同时注入 localStorage 和 StorageManager._data
-                                let script = """
-                                (function() {
-                                    try {
-                                        // 1. 解码数据
-                                        var decoded = atob('\(base64Data)');
-                                        
-                                        // 2. 写入 localStorage
-                                        localStorage.setItem('\(key)', decoded);
-                                        
-                                        // 3. ⭐ 直接写入 StorageManager._data
-                                        if (typeof StorageManager !== 'undefined') {
-                                            if (!StorageManager._data) {
-                                                StorageManager._data = {};
-                                            }
-                                            var fileKey = 'file' + \(fileId);
-                                            try {
-                                                var parsedData = JSON.parse(decoded);
-                                                StorageManager._data[fileKey] = parsedData;
-                                                console.log('✅ 直接注入 StorageManager._data[fileKey] 成功');
-                                            } catch(e) {
-                                                console.error('解析数据失败:', e);
-                                                // 如果解析失败，直接存储字符串
-                                                StorageManager._data[fileKey] = decoded;
-                                            }
-                                        }
-                                    } catch(e) {
-                                        console.error('预加载失败:', e);
-                                    }
-                                })();
-                                """
-                                scripts.append(script)
-                                log("📄 预加载脚本: \(key) (\(data.count) 字节)")
+                                pendingData.append((fileId, data))
+                                log("📄 加载待注入数据: file\(fileId) (\(data.count) 字节)")
                             } catch {
                                 log("⚠️ 读取文件失败: \(fileName)")
                             }
                         }
                     }
                 }
-                
-                return scripts.joined(separator: " ")
             } catch {
                 log("❌ 扫描存档目录失败: \(error)")
-                return ""
+            }
+        }
+
+        // MARK: - ⭐ 处理注入数据（由 JS 触发）
+        private func handleInjectData() {
+            log("📦 开始注入存档数据到 StorageManager")
+            
+            guard let webView = webView else {
+                log("❌ webView 不可用")
+                return
+            }
+            
+            if pendingData.isEmpty {
+                log("📭 没有待注入的数据")
+                return
+            }
+            
+            var scripts: [String] = []
+            for (fileId, data) in pendingData {
+                let base64Data = data.data(using: .utf8)?.base64EncodedString() ?? ""
+                let script = """
+                (function() {
+                    try {
+                        // 解码数据
+                        var decoded = atob('\(base64Data)');
+                        
+                        // 写入 localStorage
+                        var key = 'RPG File\(fileId)';
+                        localStorage.setItem(key, decoded);
+                        
+                        // ⭐ 写入 StorageManager._data
+                        if (typeof StorageManager !== 'undefined') {
+                            if (!StorageManager._data) {
+                                StorageManager._data = {};
+                            }
+                            var fileKey = 'file' + \(fileId);
+                            try {
+                                var parsedData = JSON.parse(decoded);
+                                StorageManager._data[fileKey] = parsedData;
+                                console.log('✅ StorageManager._data[fileKey] 注入成功');
+                            } catch(e) {
+                                console.error('解析数据失败:', e);
+                                StorageManager._data[fileKey] = decoded;
+                            }
+                        }
+                        
+                        // 触发存档列表刷新
+                        try {
+                            if (typeof SceneManager !== 'undefined' && SceneManager._scene) {
+                                var scene = SceneManager._scene;
+                                if (scene && scene.refresh) {
+                                    scene.refresh();
+                                }
+                            }
+                        } catch(e) {}
+                    } catch(e) {
+                        console.error('注入失败:', e);
+                    }
+                })();
+                """
+                scripts.append(script)
+            }
+            
+            let combinedScript = scripts.joined(separator: " ")
+            webView.evaluateJavaScript(combinedScript) { _, error in
+                if let error = error {
+                    self.log("❌ 注入失败: \(error)")
+                } else {
+                    self.log("✅ 数据注入成功 (\(self.pendingData.count) 个存档)")
+                    
+                    // 验证注入结果
+                    let verifyScript = """
+                    (function() {
+                        var result = {};
+                        try {
+                            if (typeof StorageManager !== 'undefined' && StorageManager._data) {
+                                for (var key in StorageManager._data) {
+                                    if (key.indexOf('file') === 0) {
+                                        result[key] = StorageManager._data[key] ? '存在' : '空';
+                                    }
+                                }
+                            }
+                        } catch(e) {}
+                        var msg = 'StorageManager._data: ' + JSON.stringify(result);
+                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                            window.webkit.messageHandlers.debugLog.postMessage(msg);
+                        }
+                    })();
+                    """
+                    webView.evaluateJavaScript(verifyScript, completionHandler: nil)
+                }
             }
         }
 
@@ -225,40 +276,9 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
             
-            // ⭐ 验证 StorageManager._data
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                let verifyScript = """
-                (function() {
-                    var result = {};
-                    try {
-                        if (typeof StorageManager !== 'undefined' && StorageManager._data) {
-                            for (var key in StorageManager._data) {
-                                if (key.indexOf('file') === 0) {
-                                    var data = StorageManager._data[key];
-                                    result[key] = data ? '存在' : '空';
-                                }
-                            }
-                        }
-                    } catch(e) {}
-                    
-                    var msg = 'StorageManager._data: ' + JSON.stringify(result);
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
-                        window.webkit.messageHandlers.debugLog.postMessage(msg);
-                    }
-                    
-                    // ⭐ 尝试触发存档列表刷新
-                    try {
-                        if (typeof SceneManager !== 'undefined' && SceneManager._scene) {
-                            var scene = SceneManager._scene;
-                            if (scene && scene.refresh) {
-                                scene.refresh();
-                                console.log('✅ 已触发场景刷新');
-                            }
-                        }
-                    } catch(e) {}
-                })();
-                """
-                webView.evaluateJavaScript(verifyScript, completionHandler: nil)
+            // ⭐ 延迟 1 秒后注入数据（等待 StorageManager 初始化完成）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.handleInjectData()
             }
         }
 
@@ -276,7 +296,7 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (StorageManager直接注入版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (延迟注入版)');
             }
 
             if (typeof StorageManager !== 'undefined') {
@@ -323,8 +343,13 @@ struct RPGWebView: UIViewRepresentable {
                     }
                 }
             };
+            
+            // ⭐ 通知 Native 可以注入数据了
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.injectData) {
+                window.webkit.messageHandlers.injectData.postMessage('ready');
+            }
 
-            console.log('✅ StorageManager直接注入版已启动');
+            console.log('✅ 延迟注入版已启动');
         })();
         """
     }
