@@ -108,7 +108,7 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - 接收保存数据
+        // MARK: - ⭐ 接收保存数据（核心功能）
         private func handleSaveData(message: WKScriptMessage) {
             guard let dict = message.body as? [String: Any],
                   let fileId = dict["fileId"] as? Int,
@@ -122,15 +122,12 @@ struct RPGWebView: UIViewRepresentable {
             
             log("💾 收到保存数据: file\(fileId), 长度: \(dataString.count)")
             
-            if dataString.count > 100 {
-                do {
-                    try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
-                    log("✅ 保存成功: \(fileName)")
-                } catch {
-                    log("❌ 保存失败: \(error)")
-                }
-            } else {
-                log("⚠️ 数据过小 (\(dataString.count) 字节)")
+            // 保存到文件
+            do {
+                try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
+                log("✅ 保存成功: \(fileName)")
+            } catch {
+                log("❌ 保存失败: \(error)")
             }
         }
 
@@ -157,7 +154,7 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - JavaScript 桥接
+    // MARK: - ⭐ JavaScript 桥接（保存功能）
     private static func bridgeJavaScript() -> String {
         return """
         (function() {
@@ -165,12 +162,17 @@ struct RPGWebView: UIViewRepresentable {
                 window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始');
             }
 
+            // ==========================================
+            // ⭐ 拦截 StorageManager.save - 备份存档到文件
+            // ==========================================
             if (typeof StorageManager !== 'undefined') {
                 var originalSave = StorageManager.save;
                 StorageManager.save = function(savefile) {
+                    // 先执行原始保存
                     var result = originalSave.call(this, savefile);
                     var fileId = savefile.savefileId || savefile.id || 1;
                     
+                    // 延迟从 localStorage 读取数据并发送给 Native
                     setTimeout(function() {
                         try {
                             var key = 'RPG File' + fileId;
@@ -183,17 +185,38 @@ struct RPGWebView: UIViewRepresentable {
                                     });
                                     console.log('📤 存档已备份，长度: ' + data.length);
                                 }
+                            } else {
+                                console.warn('⚠️ localStorage 中没有找到存档数据: ' + key);
                             }
                         } catch(e) {
                             console.error('备份失败:', e);
                         }
-                    }, 300);
+                    }, 500);
                     
                     return result;
                 };
             }
 
-            console.log('✅ 桥接注入完成');
+            // ==========================================
+            // ⭐ 拦截 localStorage.setItem - 直接捕获
+            // ==========================================
+            var originalSetItem = localStorage.setItem;
+            localStorage.setItem = function(key, value) {
+                originalSetItem.call(this, key, value);
+                
+                if (key && key.indexOf('RPG File') === 0 && value && value.length > 100) {
+                    var fileId = parseInt(key.replace('RPG File', ''));
+                    if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                        window.webkit.messageHandlers.saveData.postMessage({
+                            fileId: fileId,
+                            data: value
+                        });
+                        console.log('📤 localStorage.setItem 直接捕获: ' + key + ', 长度: ' + value.length);
+                    }
+                }
+            };
+
+            console.log('✅ 桥接注入完成 - 保存功能已启用');
         })();
         """
     }
