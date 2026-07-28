@@ -26,7 +26,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "preloadArchives")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
-        contentController.add(context.coordinator, name: "networkCapture")
+        contentController.add(context.coordinator, name: "extractResult")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -68,6 +68,7 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
+        private var extractButton: UIButton?
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -76,7 +77,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (网络拦截最终版) =====")
+            log("===== Bridge 初始化 (手动提取版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -107,8 +108,8 @@ struct RPGWebView: UIViewRepresentable {
                 log("🐛 \(message.body)")
             case "saveData":
                 handleSaveData(message: message)
-            case "networkCapture":
-                handleNetworkCapture(message: message)
+            case "extractResult":
+                handleExtractResult(message: message)
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -140,36 +141,147 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - 接收网络捕获数据
-        private func handleNetworkCapture(message: WKScriptMessage) {
+        // MARK: - 接收提取结果
+        private func handleExtractResult(message: WKScriptMessage) {
             guard let dict = message.body as? [String: Any],
-                  let url = dict["url"] as? String,
-                  let data = dict["data"] as? String else {
-                log("⚠️ 网络捕获数据格式错误")
+                  let result = dict["result"] as? String else {
+                log("⚠️ 提取结果格式错误")
+                return
+            }
+            log("📊 提取结果: \(result)")
+        }
+
+        // MARK: - 手动提取存档
+        private func manualExtract() {
+            guard let webView = webView else {
+                log("❌ webView 不可用")
                 return
             }
             
-            log("🌐 网络捕获: \(url), 长度: \(data.count)")
+            log("🔍 手动提取存档...")
             
-            // 如果数据包含 RPG Maker 存档特征，尝试保存
-            if data.count > 100 && (data.contains("savefileId") || data.contains("\"RPG\"")) {
-                // 尝试提取 fileId
-                var fileId = 1
-                if let match = data.range(of: "\"savefileId\"\\s*:\\s*(\\d+)", options: .regularExpression) {
-                    let idStr = data[match].replacingOccurrences(of: "\"savefileId\":", with: "").trimmingCharacters(in: .whitespaces)
-                    fileId = Int(idStr) ?? 1
+            let script = """
+            (function() {
+                var result = {};
+                var found = false;
+                
+                // 1. 从 StorageManager._data 提取
+                try {
+                    if (typeof StorageManager !== 'undefined' && StorageManager._data) {
+                        var data = StorageManager._data;
+                        for (var key in data) {
+                            if (key.indexOf('file') === 0) {
+                                var fileId = parseInt(key.replace('file', ''));
+                                if (!isNaN(fileId) && data[key]) {
+                                    var jsonData = JSON.stringify(data[key]);
+                                    if (jsonData && jsonData.length > 100) {
+                                        result[key] = jsonData.length;
+                                        found = true;
+                                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                            window.webkit.messageHandlers.saveData.postMessage({
+                                                fileId: fileId,
+                                                data: jsonData
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch(e) {
+                    console.error('_data 提取失败:', e);
                 }
                 
-                let fileName = "file\(fileId).rpgsave"
-                let fileURL = saveDir.appendingPathComponent(fileName)
-                
-                do {
-                    try data.write(to: fileURL, atomically: true, encoding: .utf8)
-                    log("✅ 网络捕获保存成功: \(fileName)")
-                } catch {
-                    log("❌ 网络捕获保存失败: \(error)")
+                // 2. 如果 _data 没有，从 localStorage 提取
+                if (!found) {
+                    try {
+                        for (var i = 0; i < localStorage.length; i++) {
+                            var key = localStorage.key(i);
+                            if (key && key.indexOf('RPG File') === 0) {
+                                var value = localStorage.getItem(key);
+                                if (value && value.length > 100) {
+                                    var fileId = parseInt(key.replace('RPG File', ''));
+                                    if (!isNaN(fileId)) {
+                                        result[key] = value.length;
+                                        found = true;
+                                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                            window.webkit.messageHandlers.saveData.postMessage({
+                                                fileId: fileId,
+                                                data: value
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch(e) {}
                 }
-            }
+                
+                // 3. 如果 _data 和 localStorage 都没有，尝试调用 StorageManager.load
+                if (!found) {
+                    try {
+                        for (var i = 1; i <= 5; i++) {
+                            if (typeof StorageManager !== 'undefined' && StorageManager.load) {
+                                var loadData = StorageManager.load(i);
+                                if (loadData) {
+                                    var jsonData = JSON.stringify(loadData);
+                                    if (jsonData && jsonData.length > 100) {
+                                        result['load_' + i] = jsonData.length;
+                                        found = true;
+                                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                            window.webkit.messageHandlers.saveData.postMessage({
+                                                fileId: i,
+                                                data: jsonData
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                }
+                
+                // 发送结果报告
+                var msg = found ? '✅ 找到存档: ' + JSON.stringify(result) : '❌ 未找到任何存档数据';
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.extractResult) {
+                    window.webkit.messageHandlers.extractResult.postMessage({ result: msg });
+                }
+                console.log(msg);
+            })();
+            """
+            webView.evaluateJavaScript(script, completionHandler: nil)
+        }
+
+        // MARK: - 添加提取按钮到 WebView
+        private func addExtractButton(to webView: WKWebView) {
+            // 创建按钮
+            let button = UIButton(type: .system)
+            button.setTitle("💾 提取存档", for: .normal)
+            button.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.9)
+            button.setTitleColor(.white, for: .normal)
+            button.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
+            button.layer.cornerRadius = 8
+            button.translatesAutoresizingMaskIntoConstraints = false
+            
+            // 添加点击事件
+            button.addTarget(self, action: #selector(extractButtonTapped), for: .touchUpInside)
+            
+            // 添加到 WebView
+            webView.addSubview(button)
+            NSLayoutConstraint.activate([
+                button.trailingAnchor.constraint(equalTo: webView.trailingAnchor, constant: -20),
+                button.bottomAnchor.constraint(equalTo: webView.bottomAnchor, constant: -100),
+                button.widthAnchor.constraint(equalToConstant: 120),
+                button.heightAnchor.constraint(equalToConstant: 44)
+            ])
+            
+            extractButton = button
+            log("✅ 提取按钮已添加")
+        }
+
+        @objc private func extractButtonTapped() {
+            log("🔄 用户点击提取按钮")
+            manualExtract()
         }
 
         // MARK: - 预加载存档
@@ -231,6 +343,7 @@ struct RPGWebView: UIViewRepresentable {
             self.webView = webView
             log("🌐 页面加载完成")
 
+            // 注入桥接
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -240,6 +353,7 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
 
+            // 延迟预加载
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 let triggerScript = """
                 (function() {
@@ -249,6 +363,11 @@ struct RPGWebView: UIViewRepresentable {
                 })();
                 """
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
+            }
+            
+            // ⭐ 添加提取按钮
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.addExtractButton(to: webView)
             }
         }
 
@@ -266,54 +385,11 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (网络拦截最终版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (手动提取版)');
             }
 
             // ==========================================
-            // 1. 拦截 XMLHttpRequest
-            // ==========================================
-            var originalXHROpen = XMLHttpRequest.prototype.open;
-            var originalXHRSend = XMLHttpRequest.prototype.send;
-            
-            XMLHttpRequest.prototype.open = function(method, url) {
-                this._url = url;
-                this._method = method;
-                return originalXHROpen.apply(this, arguments);
-            };
-            
-            XMLHttpRequest.prototype.send = function(data) {
-                // 捕获请求数据
-                if (data && typeof data === 'string' && data.length > 100) {
-                    console.log('📤 XHR 请求: ' + this._url + ', 长度: ' + data.length);
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.networkCapture) {
-                        window.webkit.messageHandlers.networkCapture.postMessage({
-                            url: this._url,
-                            data: data
-                        });
-                    }
-                }
-                return originalXHRSend.apply(this, arguments);
-            };
-
-            // ==========================================
-            // 2. 拦截 Fetch
-            // ==========================================
-            var originalFetch = window.fetch;
-            window.fetch = function(url, options) {
-                if (options && options.body && typeof options.body === 'string' && options.body.length > 100) {
-                    console.log('📤 Fetch 请求: ' + url + ', 长度: ' + options.body.length);
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.networkCapture) {
-                        window.webkit.messageHandlers.networkCapture.postMessage({
-                            url: url,
-                            data: options.body
-                        });
-                    }
-                }
-                return originalFetch.apply(this, arguments);
-            };
-
-            // ==========================================
-            // 3. 拦截 StorageManager（备份）
+            // 拦截 StorageManager.save（备份）
             // ==========================================
             if (typeof StorageManager !== 'undefined') {
                 var originalSave = StorageManager.save;
@@ -321,7 +397,6 @@ struct RPGWebView: UIViewRepresentable {
                     console.log('📤 StorageManager.save 被调用');
                     var result = originalSave.call(this, savefile);
                     
-                    // 延迟后从 _data 提取
                     setTimeout(function() {
                         try {
                             if (StorageManager._data) {
@@ -334,6 +409,7 @@ struct RPGWebView: UIViewRepresentable {
                                             fileId: fileId,
                                             data: jsonData
                                         });
+                                        console.log('📤 StorageManager.save 数据已发送');
                                     }
                                 }
                             }
@@ -345,56 +421,18 @@ struct RPGWebView: UIViewRepresentable {
             }
 
             // ==========================================
-            // 4. 拦截 DataManager
-            // ==========================================
-            if (typeof DataManager !== 'undefined') {
-                var originalSaveGame = DataManager.saveGame;
-                DataManager.saveGame = function(savefileId) {
-                    console.log('📤 DataManager.saveGame 被调用, ID: ' + savefileId);
-                    var result = originalSaveGame.call(this, savefileId);
-                    
-                    setTimeout(function() {
-                        try {
-                            if (typeof StorageManager !== 'undefined' && StorageManager._data) {
-                                var key = 'file' + savefileId;
-                                if (StorageManager._data[key]) {
-                                    var jsonData = JSON.stringify(StorageManager._data[key]);
-                                    if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                                        window.webkit.messageHandlers.saveData.postMessage({
-                                            fileId: savefileId,
-                                            data: jsonData
-                                        });
-                                    }
-                                }
-                            }
-                        } catch(e) {}
-                    }, 500);
-                    
-                    return result;
-                };
-            }
-
-            // ==========================================
-            // 5. 拦截 localStorage.setItem
+            // 拦截 localStorage.setItem
             // ==========================================
             var originalSetItem = localStorage.setItem;
             localStorage.setItem = function(key, value) {
                 originalSetItem.call(this, key, value);
                 if (key && key.indexOf('RPG File') === 0) {
                     console.log('📤 localStorage.setItem: ' + key + ', 长度: ' + (value ? value.length : 0));
-                    if (value && value.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                        var fileId = parseInt(key.replace('RPG File', ''));
-                        if (!isNaN(fileId)) {
-                            window.webkit.messageHandlers.saveData.postMessage({
-                                fileId: fileId,
-                                data: value
-                            });
-                        }
-                    }
                 }
             };
 
-            console.log('✅ 网络拦截最终版已启动');
+            console.log('✅ 手动提取版已启动');
+            console.log('💡 点击右下角「提取存档」按钮手动保存存档');
         })();
         """
     }
