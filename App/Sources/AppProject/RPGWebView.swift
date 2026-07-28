@@ -25,6 +25,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "saveGameFile")
         contentController.add(context.coordinator, name: "bridgeReady")
         contentController.add(context.coordinator, name: "preloadArchives")
+        contentController.add(context.coordinator, name: "debugLog")  // 新增调试
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -103,6 +104,8 @@ struct RPGWebView: UIViewRepresentable {
                 log("📨 \(message.body)")
             case "preloadArchives":
                 handlePreloadArchives()
+            case "debugLog":
+                log("🐛 \(message.body)")
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -150,7 +153,6 @@ struct RPGWebView: UIViewRepresentable {
                         if let fileId = Int(fileIdStr) {
                             do {
                                 let data = try String(contentsOf: fileURL, encoding: .utf8)
-                                // 转义特殊字符
                                 let escapedData = data.replacingOccurrences(of: "\\", with: "\\\\")
                                                          .replacingOccurrences(of: "'", with: "\\'")
                                                          .replacingOccurrences(of: "\n", with: "\\n")
@@ -168,7 +170,6 @@ struct RPGWebView: UIViewRepresentable {
                     }
                 }
                 
-                // 批量执行 JavaScript
                 if !jsScripts.isEmpty {
                     let combinedScript = jsScripts.joined(separator: " ")
                     webView.evaluateJavaScript(combinedScript) { _, error in
@@ -180,18 +181,6 @@ struct RPGWebView: UIViewRepresentable {
                     }
                 } else {
                     log("📭 没有找到存档文件")
-                    // 清空 localStorage 中的存档
-                    let clearScript = """
-                    (function() {
-                        for (var i = 0; i < localStorage.length; i++) {
-                            var key = localStorage.key(i);
-                            if (key && key.indexOf('RPG File') === 0) {
-                                localStorage.removeItem(key);
-                            }
-                        }
-                    })();
-                    """
-                    webView.evaluateJavaScript(clearScript, completionHandler: nil)
                 }
             } catch {
                 log("❌ 扫描存档目录失败: \(error)")
@@ -202,7 +191,6 @@ struct RPGWebView: UIViewRepresentable {
             self.webView = webView
             log("🌐 页面加载完成")
 
-            // 注入桥接
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -212,9 +200,8 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
 
-            // 延迟预加载存档
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                // 通知 JS 触发预加载
+                // 触发预加载
                 let triggerScript = """
                 (function() {
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.preloadArchives) {
@@ -223,22 +210,25 @@ struct RPGWebView: UIViewRepresentable {
                 })();
                 """
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
-                
-                // 检查注入状态
-                let statusScript = """
+            }
+            
+            // 持续监控 localStorage 变化（用于调试）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                let checkStorageScript = """
                 (function() {
-                    var status = '未定义';
-                    if (typeof StorageManager !== 'undefined') {
-                        status = '已定义';
-                        if (StorageManager.save) status += ', save已覆盖';
-                        if (StorageManager.load) status += ', load未覆盖(原生)';
+                    var keys = [];
+                    for (var i = 0; i < localStorage.length; i++) {
+                        var key = localStorage.key(i);
+                        if (key && key.indexOf('RPG') !== -1) {
+                            keys.push(key + ':' + localStorage.getItem(key).length);
+                        }
                     }
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                        window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager: ' + status);
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                        window.webkit.messageHandlers.debugLog.postMessage('localStorage 内容: ' + keys.join(', '));
                     }
                 })();
                 """
-                webView.evaluateJavaScript(statusScript, completionHandler: nil)
+                webView.evaluateJavaScript(checkStorageScript, completionHandler: nil)
             }
         }
 
@@ -251,7 +241,7 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - JavaScript 桥接（稳定版）
+    // MARK: - JavaScript 桥接（增强日志版）
     private static func bridgeJavaScript() -> String {
         return """
         (function() {
@@ -267,41 +257,66 @@ struct RPGWebView: UIViewRepresentable {
                 return;
             }
 
-            // 保存原始方法（不重写 load）
+            // ========== 拦截所有可能的保存方法 ==========
             var originalSave = StorageManager.save;
-
-            // ========== 只重写 save ==========
+            
+            // 1. 拦截 StorageManager.save
             StorageManager.save = function(savefile) {
-                // 先调用原始 save，更新 localStorage
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                    window.webkit.messageHandlers.debugLog.postMessage('StorageManager.save 被调用, fileId: ' + (savefile.savefileId || '未知'));
+                }
+                
                 var result = originalSave.call(this, savefile);
                 
-                // 从 localStorage 读取完整数据，发送给 Native 写入文件
                 var fileId = savefile.savefileId || 1;
                 var key = "RPG File" + fileId;
                 var data = localStorage.getItem(key);
+                
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                    window.webkit.messageHandlers.debugLog.postMessage('从 localStorage 读取: ' + key + ', 长度: ' + (data ? data.length : 0));
+                }
                 
                 if (data && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
                     window.webkit.messageHandlers.saveGameFile.postMessage({
                         fileId: fileId,
                         data: data
                     });
-                    console.log('📤 存档已备份到文件，ID: ' + fileId + ', 长度: ' + data.length);
-                } else {
-                    if (!data) {
-                        console.warn('localStorage 中没有数据: ' + key);
-                    }
+                    console.log('📤 存档已发送到 Native，ID: ' + fileId);
                 }
                 
                 return result;
             };
 
-            // ========== load 不重写，保持原生 ==========
-            // 游戏直接从 localStorage 读取，而 localStorage 已在启动时预加载
+            // 2. 拦截可能的直接 localStorage 操作（通过监控 setItem）
+            var originalSetItem = localStorage.setItem;
+            localStorage.setItem = function(key, value) {
+                originalSetItem.call(this, key, value);
+                
+                // 如果设置的是 RPG File 相关的 key
+                if (key && key.indexOf('RPG File') === 0) {
+                    var fileId = parseInt(key.replace('RPG File', ''));
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                        window.webkit.messageHandlers.debugLog.postMessage('localStorage.setItem: ' + key + ', 长度: ' + value.length);
+                    }
+                    
+                    // 同时保存到文件
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
+                        window.webkit.messageHandlers.saveGameFile.postMessage({
+                            fileId: fileId,
+                            data: value
+                        });
+                        console.log('📤 localStorage 变化已备份，ID: ' + fileId);
+                    }
+                }
+            };
+
+            // 3. 保存原始 load（不修改）
+            // 游戏直接从 localStorage 读取
 
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('✅ 桥接注入完成（稳定版）');
+                window.webkit.messageHandlers.bridgeReady.postMessage('✅ 桥接注入完成（增强监控版）');
             }
-            console.log('✅ 桥接注入完成 - 稳定版');
+            console.log('✅ 桥接注入完成 - 增强监控版');
         })();
         """
     }
