@@ -260,16 +260,21 @@ struct ContentView: View {
                     }
                     .ignoresSafeArea()
             } else {
-                // 主容器：根据 currentTab 切换视图
-                Group {
-                    if currentTab == "games" {
-                        gamesView
-                    } else {
-                        settingsView
+                // 主容器：使用 VStack 布局，底部留空给 Tab 栏
+                VStack(spacing: 0) {
+                    // 内容区域
+                    Group {
+                        if currentTab == "games" {
+                            gamesView
+                        } else {
+                            settingsView
+                        }
                     }
-                }
-                .overlay(alignment: .bottom) {
+                    
+                    // ⭐ 使用 Spacer 将 Tab 栏推到底部，但通过 padding 控制上移距离
+                    // 这里不再使用 overlay，而是直接放在 VStack 中
                     customTabBar
+                        .padding(.bottom, 30) // ⭐ 控制 Tab 栏距离屏幕底部的距离
                 }
             }
         }
@@ -431,8 +436,7 @@ struct ContentView: View {
                             }
                         }
                     }
-                    // ⭐ 修改：增加底部留白，从 80 改为 120，为下移的 Tab 栏留空间
-                    .padding(.bottom, 120)
+                    .padding(.bottom, 16)
                 }
             }
         }
@@ -580,9 +584,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 40)
-        .padding(.vertical, 4)
-        // ⭐ 修改：增大底部间距，让 Tab 栏下移（从 20 改为 40）
-        .padding(.bottom, 40)
+        .padding(.vertical, 8)
         .background(Color.clear)
     }
     
