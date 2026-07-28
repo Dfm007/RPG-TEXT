@@ -447,12 +447,7 @@ struct ContentView: View {
                     showRenameAlert = true
                 }
             }
-            Button("恢复存档") {
-                if let id = menuGameId,
-                   let game = games.first(where: { $0.id == id }) {
-                    restoreArchive(for: game)
-                }
-            }
+
             Button("取消", role: .cancel) { }
         }
         .sheet(isPresented: $showIconPicker) {
@@ -648,15 +643,7 @@ struct ContentView: View {
             
             Spacer()
             
-            // ⭐ 恢复存档按钮
-            Button {
-                restoreArchive(for: game)
-            } label: {
-                Image(systemName: "arrow.clockwise.circle")
-                    .font(.title3)
-                    .foregroundColor(.orange)
-            }
-            .buttonStyle(.plain)
+
             
             // 编辑按钮
             Button {
@@ -689,9 +676,7 @@ struct ContentView: View {
                 editingName = game.name
                 showRenameAlert = true
             }
-            Button("恢复存档") {
-                restoreArchive(for: game)
-            }
+
             Button("删除", role: .destructive) {
                 if let index = games.firstIndex(where: { $0.id == game.id }) {
                     deleteGame(at: index)
@@ -788,27 +773,7 @@ struct ContentView: View {
         }
     }
     
-    // MARK: - ⭐ 恢复存档
-    private func restoreArchive(for game: GameItem) {
-        let gameURL = getLocalGameURL(for: game)
-        let saveDir = gameURL.appendingPathComponent("save")
-        
-        guard fileManager.fileExists(atPath: saveDir.path) else {
-            importError = "没有找到可恢复的存档"
-            showErrorAlert = true
-            return
-        }
-        
-        // 通过 NotificationCenter 通知 WebView 恢复存档
-        NotificationCenter.default.post(
-            name: NSNotification.Name("RestoreArchive"),
-            object: nil,
-            userInfo: ["gamePath": gameURL]
-        )
-        
-        importError = "✅ 存档恢复中，请返回游戏查看"
-        showErrorAlert = true
-    }
+
     
     // MARK: - 导入游戏
     private func importGameArchive(from sourceURL: URL) {
