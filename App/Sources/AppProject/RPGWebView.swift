@@ -25,7 +25,6 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "bridgeReady")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
-        contentController.add(context.coordinator, name: "restoreArchive")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -67,8 +66,6 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var isWebViewReady = false
-        private var pendingRestore = false
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -77,16 +74,9 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (恢复存档版) =====")
+            log("===== Bridge 初始化 =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
-            
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleRestoreNotification(_:)),
-                name: NSNotification.Name("RestoreArchive"),
-                object: nil
-            )
         }
 
         func log(_ message: String) {
@@ -113,8 +103,6 @@ struct RPGWebView: UIViewRepresentable {
                 log("🐛 \(message.body)")
             case "saveData":
                 handleSaveData(message: message)
-            case "restoreArchive":
-                handleRestoreArchive()
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -146,133 +134,9 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - 接收恢复存档通知
-        @objc func handleRestoreNotification(_ notification: Notification) {
-            guard let userInfo = notification.userInfo,
-                  let gamePath = userInfo["gamePath"] as? URL,
-                  gamePath == self.gamePath else {
-                return
-            }
-            log("📥 收到恢复存档通知")
-            
-            if isWebViewReady {
-                handleRestoreArchive()
-            } else {
-                log("⏳ WebView 尚未就绪，等待就绪后执行")
-                pendingRestore = true
-            }
-        }
-
-        // MARK: - ⭐ 恢复存档
-        private func handleRestoreArchive() {
-            log("📦 开始恢复存档...")
-            
-            guard let webView = webView else {
-                log("❌ webView 不可用")
-                return
-            }
-            
-            let fileManager = FileManager.default
-            guard fileManager.fileExists(atPath: saveDir.path) else {
-                log("📭 save 目录不存在")
-                return
-            }
-            
-            do {
-                let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
-                var scripts: [String] = []
-                var foundFiles: [String] = []
-                
-                for fileURL in files {
-                    let fileName = fileURL.lastPathComponent
-                    if fileName.hasPrefix("file") && fileName.hasSuffix(".rpgsave") {
-                        let fileIdStr = fileName.replacingOccurrences(of: "file", with: "").replacingOccurrences(of: ".rpgsave", with: "")
-                        if let fileId = Int(fileIdStr) {
-                            do {
-                                let data = try String(contentsOf: fileURL, encoding: .utf8)
-                                let base64Data = data.data(using: .utf8)?.base64EncodedString() ?? ""
-                                let key = "RPG File\(fileId)"
-                                
-                                let script = """
-                                (function() {
-                                    try {
-                                        var decoded = atob('\(base64Data)');
-                                        localStorage.setItem('\(key)', decoded);
-                                        console.log('✅ 恢复: \(key)');
-                                    } catch(e) {
-                                        console.error('恢复失败:', e);
-                                    }
-                                })();
-                                """
-                                scripts.append(script)
-                                foundFiles.append(fileName)
-                                log("📄 恢复存档: file\(fileId) (\(data.count) 字节)")
-                            } catch {
-                                log("⚠️ 读取文件失败: \(fileName)")
-                            }
-                        }
-                    }
-                }
-                
-                if !scripts.isEmpty {
-                    let combinedScript = scripts.joined(separator: " ")
-                    webView.evaluateJavaScript(combinedScript) { _, error in
-                        if let error = error {
-                            self.log("❌ 恢复失败: \(error)")
-                        } else {
-                            self.log("✅ 恢复完成 (\(scripts.count) 个存档)")
-                            
-                            // ⭐ 通知 Native 恢复成功
-                            DispatchQueue.main.async {
-                                NotificationCenter.default.post(
-                                    name: NSNotification.Name("RestoreArchiveComplete"),
-                                    object: nil
-                                )
-                            }
-                            
-                            // 刷新游戏
-                            let refreshScript = """
-                            (function() {
-                                try {
-                                    if (typeof DataManager !== 'undefined') {
-                                        DataManager.makeSaveContents();
-                                    }
-                                    if (typeof SceneManager !== 'undefined') {
-                                        var scene = SceneManager._scene;
-                                        if (scene) {
-                                            if (scene.refresh) scene.refresh();
-                                            if (scene.update) scene.update();
-                                            if (scene.createWindowLayer) scene.createWindowLayer();
-                                        }
-                                    }
-                                    if (typeof Scene_Title !== 'undefined') {
-                                        var titleScene = SceneManager._scene;
-                                        if (titleScene && titleScene.constructor === Scene_Title) {
-                                            if (titleScene.checkContinue) titleScene.checkContinue();
-                                            if (titleScene.create) titleScene.create();
-                                        }
-                                    }
-                                    console.log('✅ 游戏刷新完成');
-                                } catch(e) {
-                                    console.error('刷新失败:', e);
-                                }
-                            })();
-                            """
-                            webView.evaluateJavaScript(refreshScript, completionHandler: nil)
-                        }
-                    }
-                } else {
-                    log("📭 没有找到存档文件")
-                }
-            } catch {
-                log("❌ 扫描存档目录失败: \(error)")
-            }
-        }
-
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             self.webView = webView
-            isWebViewReady = true
-            log("🌐 页面加载完成，WebView 已就绪")
+            log("🌐 页面加载完成")
 
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
@@ -280,15 +144,6 @@ struct RPGWebView: UIViewRepresentable {
                     self.log("❌ 注入失败: \(error)")
                 } else {
                     self.log("✅ 桥接注入成功")
-                }
-            }
-            
-            // ⭐ 如果有待处理的恢复请求，执行它
-            if pendingRestore {
-                log("🔄 执行待处理的恢复请求")
-                pendingRestore = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.handleRestoreArchive()
                 }
             }
         }
@@ -300,10 +155,6 @@ struct RPGWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             log("❌ 临时加载失败: \(error)")
         }
-        
-        deinit {
-            NotificationCenter.default.removeObserver(self)
-        }
     }
 
     // MARK: - JavaScript 桥接
@@ -311,7 +162,7 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (恢复存档版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始');
             }
 
             if (typeof StorageManager !== 'undefined') {
@@ -342,7 +193,7 @@ struct RPGWebView: UIViewRepresentable {
                 };
             }
 
-            console.log('✅ 恢复存档版已启动');
+            console.log('✅ 桥接注入完成');
         })();
         """
     }
