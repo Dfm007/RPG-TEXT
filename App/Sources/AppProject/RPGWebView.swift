@@ -25,7 +25,6 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "bridgeReady")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
-        contentController.add(context.coordinator, name: "gameReady")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -67,8 +66,7 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var pendingData: [(fileId: Int, data: String)] = []
-        private var hasAttemptedLoad = false
+        private var hasLoadedSave = false
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -77,10 +75,9 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (自动读档版) =====")
+            log("===== Bridge 初始化 (最小干预版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
-            loadPendingData()
         }
 
         func log(_ message: String) {
@@ -107,13 +104,12 @@ struct RPGWebView: UIViewRepresentable {
                 log("🐛 \(message.body)")
             case "saveData":
                 handleSaveData(message: message)
-            case "gameReady":
-                handleGameReady()
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
         }
 
+        // MARK: - 接收保存数据
         private func handleSaveData(message: WKScriptMessage) {
             guard let dict = message.body as? [String: Any],
                   let fileId = dict["fileId"] as? Int,
@@ -131,11 +127,7 @@ struct RPGWebView: UIViewRepresentable {
                 do {
                     try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
                     log("✅ 保存成功: \(fileName)")
-                    if let index = pendingData.firstIndex(where: { $0.fileId == fileId }) {
-                        pendingData[index].data = dataString
-                    } else {
-                        pendingData.append((fileId, dataString))
-                    }
+                    hasLoadedSave = true
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
@@ -144,15 +136,17 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        private func loadPendingData() {
+        // MARK: - ⭐ 构建预加载脚本（只写入 localStorage，不碰 StorageManager._data）
+        func buildPreloadScript() -> String {
             let fileManager = FileManager.default
             guard fileManager.fileExists(atPath: saveDir.path) else {
-                log("📭 save 目录不存在")
-                return
+                return ""
             }
             
             do {
                 let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
+                var scripts: [String] = []
+                
                 for fileURL in files {
                     let fileName = fileURL.lastPathComponent
                     if fileName.hasPrefix("file") && fileName.hasSuffix(".rpgsave") {
@@ -160,134 +154,32 @@ struct RPGWebView: UIViewRepresentable {
                         if let fileId = Int(fileIdStr) {
                             do {
                                 let data = try String(contentsOf: fileURL, encoding: .utf8)
-                                pendingData.append((fileId, data))
-                                log("📄 加载存档: file\(fileId) (\(data.count) 字节)")
+                                let base64Data = data.data(using: .utf8)?.base64EncodedString() ?? ""
+                                let key = "RPG File\(fileId)"
+                                
+                                // ⭐ 只写入 localStorage，不碰 StorageManager._data
+                                let script = """
+                                try {
+                                    var decoded = atob('\(base64Data)');
+                                    localStorage.setItem('\(key)', decoded);
+                                    console.log('✅ 预加载: \(key)');
+                                } catch(e) {
+                                    console.error('预加载失败:', e);
+                                }
+                                """
+                                scripts.append(script)
+                                log("📄 预加载脚本: \(key) (\(data.count) 字节)")
                             } catch {
                                 log("⚠️ 读取文件失败: \(fileName)")
                             }
                         }
                     }
                 }
+                
+                return scripts.joined(separator: " ")
             } catch {
                 log("❌ 扫描存档目录失败: \(error)")
-            }
-        }
-
-        // MARK: - ⭐ 游戏就绪后尝试自动读档
-        private func handleGameReady() {
-            log("🎮 游戏已就绪，尝试自动读档...")
-            
-            guard let webView = webView else {
-                log("❌ webView 不可用")
-                return
-            }
-            
-            // 先注入数据
-            injectData()
-            
-            // 延迟后尝试模拟点击读档
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.tryLoadGame()
-            }
-        }
-
-        // MARK: - 注入数据到 StorageManager
-        private func injectData() {
-            guard let webView = webView, !pendingData.isEmpty else {
-                return
-            }
-            
-            log("📦 注入存档数据到 StorageManager")
-            
-            var scripts: [String] = []
-            for (fileId, data) in pendingData {
-                let base64Data = data.data(using: .utf8)?.base64EncodedString() ?? ""
-                let script = """
-                (function() {
-                    try {
-                        var decoded = atob('\(base64Data)');
-                        localStorage.setItem('RPG File\(fileId)', decoded);
-                        if (typeof StorageManager !== 'undefined') {
-                            if (!StorageManager._data) {
-                                StorageManager._data = {};
-                            }
-                            try {
-                                StorageManager._data['file\(fileId)'] = JSON.parse(decoded);
-                            } catch(e) {
-                                StorageManager._data['file\(fileId)'] = decoded;
-                            }
-                        }
-                        console.log('✅ 数据注入成功: file\(fileId)');
-                    } catch(e) {
-                        console.error('注入失败:', e);
-                    }
-                })();
-                """
-                scripts.append(script)
-            }
-            
-            let combinedScript = scripts.joined(separator: " ")
-            webView.evaluateJavaScript(combinedScript) { _, error in
-                if let error = error {
-                    self.log("❌ 注入失败: \(error)")
-                } else {
-                    self.log("✅ 数据注入成功 (\(self.pendingData.count) 个存档)")
-                }
-            }
-        }
-
-        // MARK: - ⭐ 尝试加载游戏
-        private func tryLoadGame() {
-            guard let webView = webView, !hasAttemptedLoad else {
-                return
-            }
-            hasAttemptedLoad = true
-            
-            log("🔄 尝试加载存档...")
-            
-            let script = """
-            (function() {
-                try {
-                    // 尝试通过 DataManager 加载游戏
-                    if (typeof DataManager !== 'undefined' && DataManager.loadGame) {
-                        var result = DataManager.loadGame(1);
-                        if (result) {
-                            console.log('✅ DataManager.loadGame(1) 成功');
-                            // 尝试进入游戏场景
-                            if (typeof SceneManager !== 'undefined') {
-                                SceneManager.goto(Scene_Map);
-                                console.log('✅ 已切换到游戏场景');
-                            }
-                            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
-                                window.webkit.messageHandlers.debugLog.postMessage('✅ 自动读档成功');
-                            }
-                            return;
-                        }
-                    }
-                    
-                    // 备用方法：通过 StorageManager.load
-                    if (typeof StorageManager !== 'undefined' && StorageManager.load) {
-                        var saveData = StorageManager.load(1);
-                        if (saveData) {
-                            console.log('✅ StorageManager.load(1) 成功');
-                            // 尝试恢复游戏
-                            if (typeof DataManager !== 'undefined' && DataManager.setupNewGame) {
-                                // 不执行新游戏，尝试恢复
-                            }
-                            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
-                                window.webkit.messageHandlers.debugLog.postMessage('✅ StorageManager 数据存在');
-                            }
-                        }
-                    }
-                } catch(e) {
-                    console.error('自动读档失败:', e);
-                }
-            })();
-            """
-            webView.evaluateJavaScript(script) { _, error in
-                if let error = error {
-                    self.log("❌ 自动读档失败: \(error)")
-                }
+                return ""
             }
         }
 
@@ -295,6 +187,7 @@ struct RPGWebView: UIViewRepresentable {
             self.webView = webView
             log("🌐 页面加载完成")
 
+            // 注入桥接
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -304,22 +197,34 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
             
-            // 延迟后注入数据
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.injectData()
-            }
-            
-            // 延迟后通知游戏就绪
+            // ⭐ 延迟 1 秒后预加载存档（只写 localStorage）
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                if let webView = self.webView {
-                    let readyScript = """
-                    (function() {
-                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.gameReady) {
-                            window.webkit.messageHandlers.gameReady.postMessage('ready');
+                let preloadScript = self.buildPreloadScript()
+                if !preloadScript.isEmpty {
+                    self.webView?.evaluateJavaScript(preloadScript) { _, error in
+                        if let error = error {
+                            self.log("❌ 预加载失败: \(error)")
+                        } else {
+                            self.log("✅ 预加载完成")
+                            
+                            // 验证 localStorage
+                            let verifyScript = """
+                            (function() {
+                                var keys = [];
+                                for (var i = 0; i < localStorage.length; i++) {
+                                    var key = localStorage.key(i);
+                                    if (key && key.indexOf('RPG File') === 0) {
+                                        keys.push(key + ':' + localStorage.getItem(key).length);
+                                    }
+                                }
+                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                                    window.webkit.messageHandlers.debugLog.postMessage('localStorage 验证: ' + keys.join(', '));
+                                }
+                            })();
+                            """
+                            self.webView?.evaluateJavaScript(verifyScript, completionHandler: nil)
                         }
-                    })();
-                    """
-                    webView.evaluateJavaScript(readyScript, completionHandler: nil)
+                    }
                 }
             }
         }
@@ -333,52 +238,48 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - JavaScript 桥接
+    // MARK: - JavaScript 桥接（最小干预）
     private static func bridgeJavaScript() -> String {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (自动读档版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (最小干预版)');
             }
 
-            // 拦截保存
+            // ==========================================
+            // 只拦截 StorageManager.save（最小干预）
+            // ==========================================
             if (typeof StorageManager !== 'undefined') {
                 var originalSave = StorageManager.save;
                 StorageManager.save = function(savefile) {
+                    // 先执行原始保存
                     var result = originalSave.call(this, savefile);
                     var fileId = savefile.savefileId || savefile.id || 1;
+                    
+                    // 延迟从 localStorage 读取数据并发送给 Native
                     setTimeout(function() {
                         try {
                             var key = 'RPG File' + fileId;
                             var data = localStorage.getItem(key);
-                            if (data && data.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                                window.webkit.messageHandlers.saveData.postMessage({
-                                    fileId: fileId,
-                                    data: data
-                                });
+                            if (data && data.length > 100) {
+                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                    window.webkit.messageHandlers.saveData.postMessage({
+                                        fileId: fileId,
+                                        data: data
+                                    });
+                                    console.log('📤 存档已备份，长度: ' + data.length);
+                                }
                             }
-                        } catch(e) {}
-                    }, 500);
+                        } catch(e) {
+                            console.error('备份失败:', e);
+                        }
+                    }, 300);
+                    
                     return result;
                 };
             }
 
-            // 拦截 localStorage.setItem
-            var originalSetItem = localStorage.setItem;
-            localStorage.setItem = function(key, value) {
-                originalSetItem.call(this, key, value);
-                if (key && key.indexOf('RPG File') === 0 && value && value.length > 100) {
-                    var fileId = parseInt(key.replace('RPG File', ''));
-                    if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                        window.webkit.messageHandlers.saveData.postMessage({
-                            fileId: fileId,
-                            data: value
-                        });
-                    }
-                }
-            };
-
-            console.log('✅ 自动读档版已启动');
+            console.log('✅ 最小干预版已启动');
         })();
         """
     }
