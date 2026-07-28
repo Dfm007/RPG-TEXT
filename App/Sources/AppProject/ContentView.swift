@@ -431,7 +431,8 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .padding(.bottom, 80)
+                    // ⭐ 修改：增加底部留白，从 80 改为 120，为下移的 Tab 栏留空间
+                    .padding(.bottom, 120)
                 }
             }
         }
@@ -580,7 +581,8 @@ struct ContentView: View {
         }
         .padding(.horizontal, 40)
         .padding(.vertical, 4)
-        .padding(.bottom, 20)
+        // ⭐ 修改：增大底部间距，让 Tab 栏下移（从 20 改为 40）
+        .padding(.bottom, 40)
         .background(Color.clear)
     }
     
