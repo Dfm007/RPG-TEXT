@@ -26,6 +26,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "preloadArchives")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
+        contentController.add(context.coordinator, name: "networkCapture")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -75,7 +76,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (DataManager 拦截版) =====")
+            log("===== Bridge 初始化 (网络拦截最终版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -106,6 +107,8 @@ struct RPGWebView: UIViewRepresentable {
                 log("🐛 \(message.body)")
             case "saveData":
                 handleSaveData(message: message)
+            case "networkCapture":
+                handleNetworkCapture(message: message)
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -137,71 +140,36 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - 提取存档数据
-        private func extractArchive() {
-            guard let webView = webView else {
-                log("❌ webView 不可用")
+        // MARK: - 接收网络捕获数据
+        private func handleNetworkCapture(message: WKScriptMessage) {
+            guard let dict = message.body as? [String: Any],
+                  let url = dict["url"] as? String,
+                  let data = dict["data"] as? String else {
+                log("⚠️ 网络捕获数据格式错误")
                 return
             }
             
-            let script = """
-            (function() {
-                var result = {};
-                
-                // 1. 从 StorageManager._data 提取
-                try {
-                    if (typeof StorageManager !== 'undefined' && StorageManager._data) {
-                        var data = StorageManager._data;
-                        for (var key in data) {
-                            if (key.indexOf('file') === 0) {
-                                var fileId = parseInt(key.replace('file', ''));
-                                if (!isNaN(fileId) && data[key]) {
-                                    var jsonData = JSON.stringify(data[key]);
-                                    if (jsonData && jsonData.length > 100) {
-                                        result[fileId] = jsonData;
-                                        console.log('📤 从 _data 提取 file' + fileId + '，长度: ' + jsonData.length);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } catch(e) {}
-                
-                // 2. 如果 _data 没有数据，尝试从 localStorage 提取
-                if (Object.keys(result).length === 0) {
-                    try {
-                        for (var i = 0; i < localStorage.length; i++) {
-                            var key = localStorage.key(i);
-                            if (key && key.indexOf('RPG File') === 0) {
-                                var value = localStorage.getItem(key);
-                                if (value && value.length > 100) {
-                                    var fileId = parseInt(key.replace('RPG File', ''));
-                                    if (!isNaN(fileId)) {
-                                        result[fileId] = value;
-                                        console.log('📤 从 localStorage 提取 ' + key + '，长度: ' + value.length);
-                                    }
-                                }
-                            }
-                        }
-                    } catch(e) {}
+            log("🌐 网络捕获: \(url), 长度: \(data.count)")
+            
+            // 如果数据包含 RPG Maker 存档特征，尝试保存
+            if data.count > 100 && (data.contains("savefileId") || data.contains("\"RPG\"")) {
+                // 尝试提取 fileId
+                var fileId = 1
+                if let match = data.range(of: "\"savefileId\"\\s*:\\s*(\\d+)", options: .regularExpression) {
+                    let idStr = data[match].replacingOccurrences(of: "\"savefileId\":", with: "").trimmingCharacters(in: .whitespaces)
+                    fileId = Int(idStr) ?? 1
                 }
                 
-                // 3. 发送给 Native
-                for (var fileId in result) {
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                        window.webkit.messageHandlers.saveData.postMessage({
-                            fileId: parseInt(fileId),
-                            data: result[fileId]
-                        });
-                    }
-                }
+                let fileName = "file\(fileId).rpgsave"
+                let fileURL = saveDir.appendingPathComponent(fileName)
                 
-                if (Object.keys(result).length === 0) {
-                    console.log('📭 未找到任何存档数据');
+                do {
+                    try data.write(to: fileURL, atomically: true, encoding: .utf8)
+                    log("✅ 网络捕获保存成功: \(fileName)")
+                } catch {
+                    log("❌ 网络捕获保存失败: \(error)")
                 }
-            })();
-            """
-            webView.evaluateJavaScript(script, completionHandler: nil)
+            }
         }
 
         // MARK: - 预加载存档
@@ -249,10 +217,6 @@ struct RPGWebView: UIViewRepresentable {
                             self.log("❌ 预加载失败: \(error)")
                         } else {
                             self.log("✅ 预加载完成: \(loadedCount) 个存档")
-                            // 预加载后尝试提取存档
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                self.extractArchive()
-                            }
                         }
                     }
                 } else {
@@ -286,13 +250,6 @@ struct RPGWebView: UIViewRepresentable {
                 """
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
             }
-            
-            // 定时提取（每 3 秒）
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-                    self?.extractArchive()
-                }
-            }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -309,11 +266,54 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (DataManager拦截)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (网络拦截最终版)');
             }
 
             // ==========================================
-            // 1. 拦截 StorageManager.save
+            // 1. 拦截 XMLHttpRequest
+            // ==========================================
+            var originalXHROpen = XMLHttpRequest.prototype.open;
+            var originalXHRSend = XMLHttpRequest.prototype.send;
+            
+            XMLHttpRequest.prototype.open = function(method, url) {
+                this._url = url;
+                this._method = method;
+                return originalXHROpen.apply(this, arguments);
+            };
+            
+            XMLHttpRequest.prototype.send = function(data) {
+                // 捕获请求数据
+                if (data && typeof data === 'string' && data.length > 100) {
+                    console.log('📤 XHR 请求: ' + this._url + ', 长度: ' + data.length);
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.networkCapture) {
+                        window.webkit.messageHandlers.networkCapture.postMessage({
+                            url: this._url,
+                            data: data
+                        });
+                    }
+                }
+                return originalXHRSend.apply(this, arguments);
+            };
+
+            // ==========================================
+            // 2. 拦截 Fetch
+            // ==========================================
+            var originalFetch = window.fetch;
+            window.fetch = function(url, options) {
+                if (options && options.body && typeof options.body === 'string' && options.body.length > 100) {
+                    console.log('📤 Fetch 请求: ' + url + ', 长度: ' + options.body.length);
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.networkCapture) {
+                        window.webkit.messageHandlers.networkCapture.postMessage({
+                            url: url,
+                            data: options.body
+                        });
+                    }
+                }
+                return originalFetch.apply(this, arguments);
+            };
+
+            // ==========================================
+            // 3. 拦截 StorageManager（备份）
             // ==========================================
             if (typeof StorageManager !== 'undefined') {
                 var originalSave = StorageManager.save;
@@ -321,7 +321,7 @@ struct RPGWebView: UIViewRepresentable {
                     console.log('📤 StorageManager.save 被调用');
                     var result = originalSave.call(this, savefile);
                     
-                    // 延迟后提取数据
+                    // 延迟后从 _data 提取
                     setTimeout(function() {
                         try {
                             if (StorageManager._data) {
@@ -334,19 +334,18 @@ struct RPGWebView: UIViewRepresentable {
                                             fileId: fileId,
                                             data: jsonData
                                         });
-                                        console.log('📤 StorageManager.save 数据已发送');
                                     }
                                 }
                             }
                         } catch(e) {}
-                    }, 200);
+                    }, 300);
                     
                     return result;
                 };
             }
 
             // ==========================================
-            // 2. 拦截 DataManager.saveGame
+            // 4. 拦截 DataManager
             // ==========================================
             if (typeof DataManager !== 'undefined') {
                 var originalSaveGame = DataManager.saveGame;
@@ -354,7 +353,6 @@ struct RPGWebView: UIViewRepresentable {
                     console.log('📤 DataManager.saveGame 被调用, ID: ' + savefileId);
                     var result = originalSaveGame.call(this, savefileId);
                     
-                    // 延迟后从 StorageManager._data 提取
                     setTimeout(function() {
                         try {
                             if (typeof StorageManager !== 'undefined' && StorageManager._data) {
@@ -366,18 +364,37 @@ struct RPGWebView: UIViewRepresentable {
                                             fileId: savefileId,
                                             data: jsonData
                                         });
-                                        console.log('📤 DataManager.saveGame 数据已发送');
                                     }
                                 }
                             }
                         } catch(e) {}
-                    }, 300);
+                    }, 500);
                     
                     return result;
                 };
             }
 
-            console.log('✅ DataManager 拦截版已启动');
+            // ==========================================
+            // 5. 拦截 localStorage.setItem
+            // ==========================================
+            var originalSetItem = localStorage.setItem;
+            localStorage.setItem = function(key, value) {
+                originalSetItem.call(this, key, value);
+                if (key && key.indexOf('RPG File') === 0) {
+                    console.log('📤 localStorage.setItem: ' + key + ', 长度: ' + (value ? value.length : 0));
+                    if (value && value.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                        var fileId = parseInt(key.replace('RPG File', ''));
+                        if (!isNaN(fileId)) {
+                            window.webkit.messageHandlers.saveData.postMessage({
+                                fileId: fileId,
+                                data: value
+                            });
+                        }
+                    }
+                }
+            };
+
+            console.log('✅ 网络拦截最终版已启动');
         })();
         """
     }
