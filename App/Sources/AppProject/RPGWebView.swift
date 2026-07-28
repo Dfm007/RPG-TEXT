@@ -67,7 +67,8 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var extractedFileIds: Set<Int> = []
+        private var saveTimers: [Int: Timer] = [:]
+        private var hasLoadedSave = false
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -76,7 +77,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (主动提取最终版) =====")
+            log("===== Bridge 初始化 (RPG Maker MZ 专用) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -130,86 +131,85 @@ struct RPGWebView: UIViewRepresentable {
                 do {
                     try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
                     log("✅ 保存成功: \(fileName)")
-                    extractedFileIds.insert(fileId)
+                    hasLoadedSave = true
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
             } else {
-                log("⚠️ 数据过小 (\(dataString.count) 字节)")
+                log("⚠️ 数据过小 (\(dataString.count) 字节)，可能是空存档，忽略")
             }
         }
 
-        // MARK: - ⭐ 核心：主动从游戏提取数据
-        private func extractArchive(fileId: Int) {
+        // MARK: - ⭐ 核心：从 StorageManager._data 提取所有存档
+        private func extractAllArchives() {
             guard let webView = webView else {
                 log("❌ webView 不可用")
                 return
             }
             
-            log("🔍 主动提取存档, fileId: \(fileId)")
+            log("🔍 从 StorageManager._data 提取所有存档")
             
             let script = """
             (function() {
-                var fileId = \(fileId);
-                var data = null;
-                var source = '';
+                var result = {};
                 
-                // 方式1: 从 StorageManager.load 获取
                 try {
-                    if (typeof StorageManager !== 'undefined' && StorageManager.load) {
-                        var result = StorageManager.load(fileId);
-                        if (result !== null && result !== undefined) {
-                            data = JSON.stringify(result);
-                            source = 'StorageManager.load';
-                            console.log('✅ 从 StorageManager.load 获取数据，长度: ' + data.length);
+                    // 直接读取 StorageManager._data（RPG Maker MZ 内部存储）
+                    if (typeof StorageManager !== 'undefined' && StorageManager._data) {
+                        var data = StorageManager._data;
+                        if (data) {
+                            // 遍历所有存档
+                            for (var key in data) {
+                                if (key.indexOf('file') === 0) {
+                                    var fileId = parseInt(key.replace('file', ''));
+                                    if (!isNaN(fileId)) {
+                                        var saveData = data[key];
+                                        if (saveData) {
+                                            var jsonData = JSON.stringify(saveData);
+                                            if (jsonData && jsonData.length > 100) {
+                                                result[fileId] = jsonData;
+                                                console.log('📤 提取存档 file' + fileId + '，长度: ' + jsonData.length);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                } catch(e) {}
-                
-                // 方式2: 如果方式1失败，尝试从 window.saveData 获取
-                if (!data || data.length < 100) {
-                    try {
-                        if (window.saveData !== undefined) {
-                            data = JSON.stringify(window.saveData);
-                            source = 'window.saveData';
-                            console.log('✅ 从 window.saveData 获取数据，长度: ' + data.length);
-                        }
-                    } catch(e) {}
-                }
-                
-                // 方式3: 如果还失败，尝试从 window._saveData 获取
-                if (!data || data.length < 100) {
-                    try {
-                        if (window._saveData !== undefined) {
-                            data = JSON.stringify(window._saveData);
-                            source = 'window._saveData';
-                            console.log('✅ 从 window._saveData 获取数据，长度: ' + data.length);
-                        }
-                    } catch(e) {}
-                }
-                
-                // 方式4: 最后尝试从 localStorage 获取
-                if (!data || data.length < 100) {
-                    try {
-                        var key = 'RPG File' + fileId;
-                        var value = localStorage.getItem(key);
-                        if (value && value.length > 100) {
-                            data = value;
-                            source = 'localStorage';
-                            console.log('✅ 从 localStorage 获取数据，长度: ' + data.length);
-                        }
-                    } catch(e) {}
+                } catch(e) {
+                    console.error('提取存档失败:', e);
                 }
                 
                 // 发送给 Native
-                if (data && data.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                    window.webkit.messageHandlers.saveData.postMessage({
-                        fileId: fileId,
-                        data: data
-                    });
-                    console.log('📤 数据已发送 (来源: ' + source + ')，长度: ' + data.length);
-                } else {
-                    console.warn('⚠️ 未找到存档数据，尝试的数据源: ' + source);
+                for (var fileId in result) {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                        window.webkit.messageHandlers.saveData.postMessage({
+                            fileId: parseInt(fileId),
+                            data: result[fileId]
+                        });
+                    }
+                }
+                
+                // 如果没有提取到任何存档，尝试从 localStorage 读取
+                if (Object.keys(result).length === 0) {
+                    try {
+                        for (var i = 0; i < localStorage.length; i++) {
+                            var key = localStorage.key(i);
+                            if (key && key.indexOf('RPG File') === 0) {
+                                var value = localStorage.getItem(key);
+                                if (value && value.length > 100) {
+                                    var fileId = parseInt(key.replace('RPG File', ''));
+                                    if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                        window.webkit.messageHandlers.saveData.postMessage({
+                                            fileId: fileId,
+                                            data: value
+                                        });
+                                        console.log('📤 从 localStorage 提取: ' + key + ', 长度: ' + value.length);
+                                    }
+                                }
+                            }
+                        }
+                    } catch(e) {}
                 }
             })();
             """
@@ -261,6 +261,10 @@ struct RPGWebView: UIViewRepresentable {
                             self.log("❌ 预加载失败: \(error)")
                         } else {
                             self.log("✅ 预加载完成: \(loadedCount) 个存档")
+                            // 预加载后，从 StorageManager._data 提取存档
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                self.extractAllArchives()
+                            }
                         }
                     }
                 } else {
@@ -275,7 +279,6 @@ struct RPGWebView: UIViewRepresentable {
             self.webView = webView
             log("🌐 页面加载完成")
 
-            // 注入桥接
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -297,11 +300,22 @@ struct RPGWebView: UIViewRepresentable {
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
             }
             
-            // ⭐ 延迟 3 秒后主动提取存档（用于恢复存档）
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                self.extractArchive(fileId: 1)
-                self.extractArchive(fileId: 2)
-                self.extractArchive(fileId: 3)
+            // ⭐ 启动定时轮询，每 5 秒检查一次是否有新存档
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                self.startPolling()
+            }
+        }
+        
+        // MARK: - ⭐ 定时轮询
+        private func startPolling() {
+            log("🔄 启动定时轮询 (每 5 秒检查一次)")
+            
+            Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] timer in
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+                self.extractAllArchives()
             }
         }
 
@@ -319,47 +333,53 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (主动提取)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (RPG Maker MZ)');
             }
 
             // ==========================================
-            // 拦截 StorageManager.save
+            // RPG Maker MZ 专用拦截
             // ==========================================
-            if (typeof StorageManager !== 'undefined' && StorageManager.save) {
-                var originalSave = StorageManager.save;
-                StorageManager.save = function(savefile) {
-                    console.log('📤 StorageManager.save 被调用');
-                    var result = originalSave.call(this, savefile);
-                    
-                    // 保存后主动提取数据
-                    var fileId = savefile.savefileId || savefile.id || 1;
-                    setTimeout(function() {
-                        try {
-                            if (StorageManager.load) {
-                                var data = StorageManager.load(fileId);
-                                if (data) {
-                                    var json = JSON.stringify(data);
-                                    if (json && json.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                                        window.webkit.messageHandlers.saveData.postMessage({
-                                            fileId: fileId,
-                                            data: json
-                                        });
-                                        console.log('📤 StorageManager.save 后提取数据成功，长度: ' + json.length);
-                                    }
+            
+            if (typeof StorageManager === 'undefined') {
+                console.warn('StorageManager 未定义');
+                return;
+            }
+
+            // ⭐ 拦截 StorageManager.save
+            var originalSave = StorageManager.save;
+            StorageManager.save = function(savefile) {
+                console.log('📤 StorageManager.save 被调用');
+                var result = originalSave.call(this, savefile);
+                
+                // 保存后立即从 _data 提取
+                var fileId = savefile.savefileId || savefile.id || 1;
+                
+                // 延迟 300ms 后从 _data 读取
+                setTimeout(function() {
+                    try {
+                        if (StorageManager._data) {
+                            var data = StorageManager._data;
+                            var key = 'file' + fileId;
+                            if (data[key]) {
+                                var jsonData = JSON.stringify(data[key]);
+                                if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                    window.webkit.messageHandlers.saveData.postMessage({
+                                        fileId: fileId,
+                                        data: jsonData
+                                    });
+                                    console.log('📤 从 _data 提取存档成功，长度: ' + jsonData.length);
                                 }
                             }
-                        } catch(e) {
-                            console.error('提取数据失败:', e);
                         }
-                    }, 500);
-                    
-                    return result;
-                };
-            }
+                    } catch(e) {
+                        console.error('提取失败:', e);
+                    }
+                }, 300);
+                
+                return result;
+            };
 
-            // ==========================================
-            // 拦截 localStorage.setItem
-            // ==========================================
+            // ⭐ 拦截 localStorage.setItem
             var originalSetItem = localStorage.setItem;
             localStorage.setItem = function(key, value) {
                 originalSetItem.call(this, key, value);
@@ -368,7 +388,7 @@ struct RPGWebView: UIViewRepresentable {
                 }
             };
 
-            console.log('✅ 桥接注入完成 - 主动提取版');
+            console.log('✅ RPG Maker MZ 桥接注入完成');
         })();
         """
     }
