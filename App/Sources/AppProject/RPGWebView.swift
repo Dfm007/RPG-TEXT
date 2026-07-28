@@ -28,6 +28,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveArchiveData")
         contentController.add(context.coordinator, name: "captureArchive")
+        contentController.add(context.coordinator, name: "indexedDBData")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.expertBridgeJavaScript(),
@@ -69,7 +70,8 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var saveTimers: [Int: Timer] = [:]
+        private var extractAttempts = 0
+        private var extractedFileIds: Set<Int> = []
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -78,7 +80,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (最终专家版) =====")
+            log("===== Bridge 初始化 (IndexedDB提取版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -113,8 +115,45 @@ struct RPGWebView: UIViewRepresentable {
                 handleSaveArchiveData(message: message)
             case "captureArchive":
                 handleCaptureArchive(message: message)
+            case "indexedDBData":
+                handleIndexedDBData(message: message)
             default:
                 log("⚠️ 未知消息: \(message.name)")
+            }
+        }
+
+        // MARK: - 处理 IndexedDB 提取的数据
+        private func handleIndexedDBData(message: WKScriptMessage) {
+            guard let dict = message.body as? [String: Any],
+                  let fileId = dict["fileId"] as? Int,
+                  let data = dict["data"] as? String else {
+                log("⚠️ IndexedDB 数据格式错误")
+                return
+            }
+            
+            if data.count > 100 {
+                let fileName = "file\(fileId).rpgsave"
+                let fileURL = saveDir.appendingPathComponent(fileName)
+                
+                log("💾 IndexedDB 提取: file\(fileId), 长度: \(data.count)")
+                
+                do {
+                    try data.write(to: fileURL, atomically: true, encoding: .utf8)
+                    log("✅ 存档提取成功: \(fileName)")
+                    extractedFileIds.insert(fileId)
+                    
+                    // 更新 localStorage
+                    let escapedData = data.replacingOccurrences(of: "\\", with: "\\\\")
+                                             .replacingOccurrences(of: "'", with: "\\'")
+                                             .replacingOccurrences(of: "\n", with: "\\n")
+                                             .replacingOccurrences(of: "\r", with: "\\r")
+                    let script = "localStorage.setItem('RPG File\(fileId)', '\(escapedData)');"
+                    webView?.evaluateJavaScript(script, completionHandler: nil)
+                    
+                    probeGameStorage()
+                } catch {
+                    log("❌ 提取失败: \(error)")
+                }
             }
         }
 
@@ -129,7 +168,6 @@ struct RPGWebView: UIViewRepresentable {
             
             log("🎯 捕获存档: file\(fileId), 长度: \(data.count)")
             
-            // 只有数据大于 1000 才保存（真正的存档数据）
             if data.count > 1000 {
                 let fileName = "file\(fileId).rpgsave"
                 let fileURL = saveDir.appendingPathComponent(fileName)
@@ -141,70 +179,7 @@ struct RPGWebView: UIViewRepresentable {
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
-            } else {
-                // 数据太小，可能是占位符，延迟后再次尝试从 localStorage 读取
-                log("⚠️ 数据过小 (\(data.count) 字节)，可能是占位符，延迟重试...")
-                saveTimers[fileId]?.invalidate()
-                let timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
-                    self?.fetchFromLocalStorage(fileId: fileId)
-                    self?.saveTimers.removeValue(forKey: fileId)
-                }
-                saveTimers[fileId] = timer
             }
-        }
-
-        // MARK: - 从 localStorage 获取完整数据
-        private func fetchFromLocalStorage(fileId: Int) {
-            guard let webView = webView else {
-                log("❌ webView 不可用")
-                return
-            }
-            
-            log("🔄 从 localStorage 获取完整数据, fileId: \(fileId)")
-            
-            let script = """
-            (function() {
-                var key = 'RPG File\(fileId)';
-                var data = localStorage.getItem(key);
-                if (data && data.length > 1000 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.captureArchive) {
-                    window.webkit.messageHandlers.captureArchive.postMessage({
-                        fileId: \(fileId),
-                        data: data
-                    });
-                    console.log('📤 从 localStorage 获取完整数据，长度: ' + data.length);
-                } else {
-                    // 如果 localStorage 也没有完整数据，从 IndexedDB 尝试
-                    if (window.indexedDB) {
-                        try {
-                            var request = indexedDB.open('RPG_Data');
-                            request.onsuccess = function(event) {
-                                var db = event.target.result;
-                                if (db.objectStoreNames.contains('savefiles')) {
-                                    var tx = db.transaction('savefiles', 'readonly');
-                                    var store = tx.objectStore('savefiles');
-                                    var getReq = store.get('file\(fileId)');
-                                    getReq.onsuccess = function(e) {
-                                        var result = e.target.result;
-                                        if (result) {
-                                            var jsonData = JSON.stringify(result);
-                                            if (jsonData && jsonData.length > 1000 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.captureArchive) {
-                                                window.webkit.messageHandlers.captureArchive.postMessage({
-                                                    fileId: \(fileId),
-                                                    data: jsonData
-                                                });
-                                            }
-                                        }
-                                    };
-                                }
-                            };
-                        } catch(e) {
-                            console.error('IndexedDB read error:', e);
-                        }
-                    }
-                }
-            })();
-            """
-            webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
         // MARK: - 处理保存请求
@@ -223,13 +198,10 @@ struct RPGWebView: UIViewRepresentable {
             
             log("📝 收到保存请求: \(key), fileId: \(fileId)")
             
-            // 延迟 2 秒后从 localStorage 获取完整数据
-            saveTimers[fileId]?.invalidate()
-            let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-                self?.fetchFromLocalStorage(fileId: fileId)
-                self?.saveTimers.removeValue(forKey: fileId)
+            // 延迟后从 IndexedDB 获取数据
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.extractFromIndexedDB(fileId: fileId)
             }
-            saveTimers[fileId] = timer
         }
 
         // MARK: - 接收存档数据
@@ -255,6 +227,159 @@ struct RPGWebView: UIViewRepresentable {
                     log("❌ 保存失败: \(error)")
                 }
             }
+        }
+
+        // MARK: - ⭐ 核心方法：从 IndexedDB 提取存档
+        private func extractFromIndexedDB(fileId: Int? = nil) {
+            guard let webView = webView else {
+                log("❌ webView 不可用")
+                return
+            }
+            
+            log("🔍 从 IndexedDB 提取存档数据...")
+            
+            let script = """
+            (function() {
+                var targetFileId = \(fileId != nil ? String(fileId!) : "null");
+                
+                // 尝试多个可能的数据库名和表名
+                var dbConfigs = [
+                    { db: 'RPG_Data', store: 'savefiles' },
+                    { db: 'RPG_Data', store: 'saves' },
+                    { db: 'SaveData', store: 'saves' },
+                    { db: 'GameData', store: 'files' },
+                    { db: 'RPGMaker', store: 'archive' },
+                    { db: 'wdzwy5.2.4tdpjb', store: 'savefiles' },
+                    { db: 'wdzwy5.2.4tdpjb', store: 'saves' },
+                    { db: 'RPG', store: 'savefiles' },
+                    { db: 'RPG', store: 'saves' }
+                ];
+                
+                function tryExtract(dbName, storeName, fileId) {
+                    try {
+                        var request = indexedDB.open(dbName);
+                        request.onsuccess = function(event) {
+                            var db = event.target.result;
+                            if (!db.objectStoreNames.contains(storeName)) {
+                                return;
+                            }
+                            var tx = db.transaction(storeName, 'readonly');
+                            var store = tx.objectStore(storeName);
+                            
+                            // 如果有指定 fileId，只提取那一个
+                            if (fileId !== null) {
+                                var key = 'file' + fileId;
+                                var getReq = store.get(key);
+                                getReq.onsuccess = function(e) {
+                                    var result = e.target.result;
+                                    if (result) {
+                                        var jsonData = JSON.stringify(result);
+                                        if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.indexedDBData) {
+                                            window.webkit.messageHandlers.indexedDBData.postMessage({
+                                                fileId: fileId,
+                                                data: jsonData
+                                            });
+                                            console.log('📤 从 IndexedDB 提取: ' + dbName + '/' + storeName + '/' + key);
+                                        }
+                                    }
+                                };
+                            } else {
+                                // 提取所有存档
+                                var getAllReq = store.getAll();
+                                getAllReq.onsuccess = function(e) {
+                                    var results = e.target.result;
+                                    if (results && results.length > 0) {
+                                        for (var i = 0; i < results.length; i++) {
+                                            var item = results[i];
+                                            if (item) {
+                                                try {
+                                                    var jsonData = JSON.stringify(item);
+                                                    // 尝试提取 fileId
+                                                    var id = i + 1;
+                                                    if (item.savefileId !== undefined) id = item.savefileId;
+                                                    if (item.id !== undefined) id = item.id;
+                                                    
+                                                    if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.indexedDBData) {
+                                                        window.webkit.messageHandlers.indexedDBData.postMessage({
+                                                            fileId: id,
+                                                            data: jsonData
+                                                        });
+                                                        console.log('📤 从 IndexedDB 提取全部: ' + dbName + '/' + storeName + '/' + id);
+                                                    }
+                                                } catch(e) {}
+                                            }
+                                        }
+                                    }
+                                };
+                            }
+                        };
+                    } catch(e) {
+                        // 忽略错误
+                    }
+                }
+                
+                // 遍历所有配置
+                for (var config of dbConfigs) {
+                    tryExtract(config.db, config.store, targetFileId);
+                }
+                
+                // 如果是提取全部，也尝试遍历所有数据库
+                if (targetFileId === null) {
+                    try {
+                        if (indexedDB.databases) {
+                            indexedDB.databases().then(function(dbs) {
+                                for (var dbInfo of dbs) {
+                                    var dbName = dbInfo.name;
+                                    if (dbName.indexOf('RPG') !== -1 || dbName.indexOf('Save') !== -1 || dbName.indexOf('Data') !== -1) {
+                                        try {
+                                            var request = indexedDB.open(dbName);
+                                            request.onsuccess = function(event) {
+                                                var db = event.target.result;
+                                                var storeNames = db.objectStoreNames;
+                                                for (var i = 0; i < storeNames.length; i++) {
+                                                    var storeName = storeNames[i];
+                                                    if (storeName.indexOf('save') !== -1 || storeName.indexOf('file') !== -1 || storeName.indexOf('data') !== -1) {
+                                                        try {
+                                                            var tx = db.transaction(storeName, 'readonly');
+                                                            var store = tx.objectStore(storeName);
+                                                            var getAllReq = store.getAll();
+                                                            getAllReq.onsuccess = function(e) {
+                                                                var results = e.target.result;
+                                                                if (results && results.length > 0) {
+                                                                    for (var j = 0; j < results.length; j++) {
+                                                                        var item = results[j];
+                                                                        if (item) {
+                                                                            try {
+                                                                                var jsonData = JSON.stringify(item);
+                                                                                if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.indexedDBData) {
+                                                                                    var id = j + 1;
+                                                                                    if (item.savefileId !== undefined) id = item.savefileId;
+                                                                                    if (item.id !== undefined) id = item.id;
+                                                                                    window.webkit.messageHandlers.indexedDBData.postMessage({
+                                                                                        fileId: id,
+                                                                                        data: jsonData
+                                                                                    });
+                                                                                    console.log('📤 遍历提取: ' + dbName + '/' + storeName + '/' + id);
+                                                                                }
+                                                                            } catch(e) {}
+                                                                        }
+                                                                    }
+                                                                }
+                                                            };
+                                                        } catch(e) {}
+                                                    }
+                                                }
+                                            };
+                                        } catch(e) {}
+                                    }
+                                }
+                            });
+                        }
+                    } catch(e) {}
+                }
+            })();
+            """
+            webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
         // MARK: - 探测游戏存储
@@ -340,6 +465,10 @@ struct RPGWebView: UIViewRepresentable {
                     }
                 } else {
                     log("📭 没有找到存档文件")
+                    // ⭐ 没有本地存档，从 IndexedDB 提取
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.extractFromIndexedDB(fileId: nil)
+                    }
                     probeGameStorage()
                 }
             } catch {
@@ -371,6 +500,11 @@ struct RPGWebView: UIViewRepresentable {
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
             }
             
+            // ⭐ 延迟 2 秒后从 IndexedDB 提取全部存档（如果预加载没有找到）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                self.extractFromIndexedDB(fileId: nil)
+            }
+            
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 self.probeGameStorage()
             }
@@ -390,7 +524,7 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (最终专家版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (IndexedDB提取版)');
             }
 
             // ==========================================
@@ -406,7 +540,6 @@ struct RPGWebView: UIViewRepresentable {
                             data: value || ''
                         });
                     }
-                    console.log('📤 localStorage.setItem: ' + key + ', 长度: ' + (value ? value.length : 0));
                 }
             };
 
@@ -419,9 +552,6 @@ struct RPGWebView: UIViewRepresentable {
                     var result = originalSave.call(this, savefile);
                     var fileId = savefile.savefileId || savefile.id || 1;
                     
-                    console.log('📤 StorageManager.save: fileId=' + fileId);
-                    
-                    // 延迟后检查 localStorage
                     setTimeout(function() {
                         var key = 'RPG File' + fileId;
                         var data = localStorage.getItem(key);
@@ -431,7 +561,6 @@ struct RPGWebView: UIViewRepresentable {
                                     fileId: fileId,
                                     data: data
                                 });
-                                console.log('📤 从 localStorage 捕获完整数据，长度: ' + data.length);
                             }
                         }
                     }, 500);
@@ -440,37 +569,7 @@ struct RPGWebView: UIViewRepresentable {
                 };
             }
 
-            // ==========================================
-            // 3. 主动轮询检测 localStorage 变化
-            // ==========================================
-            var lastRPGData = {};
-            
-            function checkRPGData() {
-                for (var i = 0; i < localStorage.length; i++) {
-                    var key = localStorage.key(i);
-                    if (key && key.indexOf('RPG File') === 0) {
-                        var value = localStorage.getItem(key);
-                        if (value && value.length > 1000) {
-                            var fileId = parseInt(key.replace('RPG File', ''));
-                            if (lastRPGData[key] !== value) {
-                                lastRPGData[key] = value;
-                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.captureArchive) {
-                                    window.webkit.messageHandlers.captureArchive.postMessage({
-                                        fileId: fileId,
-                                        data: value
-                                    });
-                                    console.log('📤 轮询捕获存档: ' + key + ', 长度: ' + value.length);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // 每 1.5 秒检查一次
-            setInterval(checkRPGData, 1500);
-
-            console.log('✅ 最终专家版拦截已启动');
+            console.log('✅ IndexedDB提取版拦截已启动');
         })();
         """
     }
