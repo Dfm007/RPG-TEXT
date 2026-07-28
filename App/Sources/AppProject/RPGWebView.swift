@@ -75,9 +75,17 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (手动恢复版) =====")
+            log("===== Bridge 初始化 (恢复存档版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
+            
+            // ⭐ 监听恢复存档通知
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleRestoreNotification(_:)),
+                name: NSNotification.Name("RestoreArchive"),
+                object: nil
+            )
         }
 
         func log(_ message: String) {
@@ -137,9 +145,20 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - ⭐ 手动恢复存档（由用户触发）
+        // MARK: - ⭐ 接收恢复存档通知
+        @objc func handleRestoreNotification(_ notification: Notification) {
+            guard let userInfo = notification.userInfo,
+                  let gamePath = userInfo["gamePath"] as? URL,
+                  gamePath == self.gamePath else {
+                return
+            }
+            log("📥 收到恢复存档通知")
+            handleRestoreArchive()
+        }
+
+        // MARK: - ⭐ 恢复存档（由用户触发）
         private func handleRestoreArchive() {
-            log("📦 手动恢复存档...")
+            log("📦 开始恢复存档...")
             
             guard let webView = webView else {
                 log("❌ webView 不可用")
@@ -155,6 +174,7 @@ struct RPGWebView: UIViewRepresentable {
             do {
                 let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
                 var scripts: [String] = []
+                var foundFiles: [String] = []
                 
                 for fileURL in files {
                     let fileName = fileURL.lastPathComponent
@@ -178,6 +198,7 @@ struct RPGWebView: UIViewRepresentable {
                                 })();
                                 """
                                 scripts.append(script)
+                                foundFiles.append(fileName)
                                 log("📄 恢复存档: file\(fileId) (\(data.count) 字节)")
                             } catch {
                                 log("⚠️ 读取文件失败: \(fileName)")
@@ -194,20 +215,30 @@ struct RPGWebView: UIViewRepresentable {
                         } else {
                             self.log("✅ 恢复完成 (\(scripts.count) 个存档)")
                             
-                            // 刷新游戏界面
+                            // ⭐ 刷新游戏界面
                             let refreshScript = """
                             (function() {
                                 try {
+                                    // 刷新场景
                                     if (typeof SceneManager !== 'undefined' && SceneManager._scene) {
                                         var scene = SceneManager._scene;
                                         if (scene && scene.refresh) {
                                             scene.refresh();
+                                            console.log('✅ 场景已刷新');
                                         }
                                     }
+                                    // 刷新存档列表
                                     if (typeof DataManager !== 'undefined') {
                                         DataManager.makeSaveContents();
+                                        console.log('✅ 存档列表已刷新');
                                     }
-                                } catch(e) {}
+                                    // 触发事件
+                                    if (typeof $gameSystem !== 'undefined') {
+                                        $gameSystem.onAfterLoad();
+                                    }
+                                } catch(e) {
+                                    console.error('刷新失败:', e);
+                                }
                             })();
                             """
                             webView.evaluateJavaScript(refreshScript, completionHandler: nil)
@@ -242,6 +273,10 @@ struct RPGWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             log("❌ 临时加载失败: \(error)")
         }
+        
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
     }
 
     // MARK: - JavaScript 桥接
@@ -249,15 +284,20 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (手动恢复版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (恢复存档版)');
             }
 
+            // ==========================================
+            // 拦截 StorageManager.save
+            // ==========================================
             if (typeof StorageManager !== 'undefined') {
                 var originalSave = StorageManager.save;
                 StorageManager.save = function(savefile) {
+                    // 先执行原始保存
                     var result = originalSave.call(this, savefile);
                     var fileId = savefile.savefileId || savefile.id || 1;
                     
+                    // 延迟从 localStorage 读取数据并发送给 Native
                     setTimeout(function() {
                         try {
                             var key = 'RPG File' + fileId;
@@ -280,8 +320,8 @@ struct RPGWebView: UIViewRepresentable {
                 };
             }
 
-            console.log('✅ 手动恢复版已启动');
-            console.log('💡 在设置中点击「恢复存档」来恢复存档');
+            console.log('✅ 恢复存档版已启动');
+            console.log('💡 点击游戏列表的「恢复存档」按钮来恢复存档');
         })();
         """
     }
