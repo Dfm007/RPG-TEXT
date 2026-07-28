@@ -274,7 +274,7 @@ struct ContentView: View {
                     // ⭐ 底部留白 + Tab 栏
                     VStack(spacing: 0) {
                         Spacer()
-                            .frame(height: 20) // ⭐ 控制 Tab 栏上方的间距（数值越大，Tab 栏越往下移）
+                            .frame(height: 10) // ⭐ 控制 Tab 栏上方的间距（数值越大，Tab 栏越往下移）
                         customTabBar
                     }
                 }
