@@ -68,7 +68,7 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var saveTimer: Timer?
+        private var pendingSaves: [Int: Timer] = [:]
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -115,11 +115,10 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - 保存存档
+        // MARK: - 处理保存请求（延迟读取完整数据）
         private func handleSave(message: WKScriptMessage) {
             guard let dict = message.body as? [String: Any],
-                  let key = dict["key"] as? String,
-                  let dataString = dict["data"] as? String else {
+                  let key = dict["key"] as? String else {
                 log("⚠️ 保存消息格式错误")
                 return
             }
@@ -130,85 +129,47 @@ struct RPGWebView: UIViewRepresentable {
                 return
             }
             
-            let fileName = "file\(fileId).rpgsave"
-            let fileURL = saveDir.appendingPathComponent(fileName)
+            log("📝 收到保存请求: \(key), fileId: \(fileId)")
             
-            log("📝 保存: \(key), 数据长度: \(dataString.count)")
+            // 取消之前的定时器
+            pendingSaves[fileId]?.invalidate()
             
-            // 如果数据是占位符（0 或 1），等待完整数据
-            if dataString == "0" || dataString == "1" || dataString.count < 10 {
-                log("⏳ 检测到占位数据，等待完整存档...")
-                // 启动定时器，每 2 秒尝试获取完整数据，最多 5 次
-                var attempts = 0
-                saveTimer?.invalidate()
-                saveTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { timer in
-                    attempts += 1
-                    if attempts > 5 {
-                        timer.invalidate()
-                        self.log("❌ 等待超时，放弃获取完整存档")
-                        return
-                    }
-                    self.log("🔄 尝试获取完整数据 (第 \(attempts) 次)...")
-                    
-                    // 尝试从游戏获取完整存档
-                    let getScript = """
-                    (function() {
-                        var data = null;
-                        // 尝试多种方式获取存档数据
-                        try {
-                            // 方式1: 从 StorageManager 获取
-                            if (typeof StorageManager !== 'undefined') {
-                                var saveData = StorageManager.load(\(fileId));
-                                if (saveData) {
-                                    data = JSON.stringify(saveData);
-                                }
-                            }
-                        } catch(e) {}
-                        
-                        // 方式2: 从 localStorage 获取（如果存在完整数据）
-                        if (!data || data === 'null' || data.length < 10) {
-                            try {
-                                var storageData = localStorage.getItem('RPG File\(fileId)');
-                                if (storageData && storageData.length > 10) {
-                                    data = storageData;
-                                }
-                            } catch(e) {}
-                        }
-                        
-                        // 方式3: 从全局变量获取（某些游戏会暴露存档数据）
-                        if (!data || data === 'null' || data.length < 10) {
-                            try {
-                                if (window._saveData) {
-                                    data = JSON.stringify(window._saveData);
-                                }
-                            } catch(e) {}
-                        }
-                        
-                        if (data && data.length > 10 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveArchiveData) {
-                            window.webkit.messageHandlers.saveArchiveData.postMessage({
-                                fileId: \(fileId),
-                                data: data
-                            });
-                            console.log('📤 完整存档已获取，长度: ' + data.length);
-                        } else {
-                            console.warn('无法获取完整存档数据');
-                        }
-                    })();
-                    """
-                    self.webView?.evaluateJavaScript(getScript, completionHandler: nil)
-                }
-            } else {
-                // 数据正常，直接保存
-                do {
-                    try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
-                    log("✅ 写入成功: \(fileName)")
-                } catch {
-                    log("❌ 写入失败: \(error)")
-                }
+            // 延迟 1.5 秒后从 localStorage 读取完整数据（等待游戏写入完成）
+            let timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+                self?.fetchCompleteArchive(fileId: fileId)
+                self?.pendingSaves.removeValue(forKey: fileId)
             }
+            pendingSaves[fileId] = timer
         }
 
-        // MARK: - 接收完整存档数据
+        // MARK: - 从 localStorage 获取完整存档数据
+        private func fetchCompleteArchive(fileId: Int) {
+            guard let webView = webView else {
+                log("❌ webView 不可用")
+                return
+            }
+            
+            log("🔄 获取完整存档数据, fileId: \(fileId)")
+            
+            let script = """
+            (function() {
+                var key = 'RPG File\(fileId)';
+                var data = localStorage.getItem(key);
+                if (data && data.length > 10 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveArchiveData) {
+                    window.webkit.messageHandlers.saveArchiveData.postMessage({
+                        fileId: \(fileId),
+                        data: data
+                    });
+                    console.log('📤 完整存档已获取，长度: ' + data.length);
+                } else {
+                    console.warn('未获取到完整存档数据');
+                }
+            })();
+            """
+            webView.evaluateJavaScript(script, completionHandler: nil)
+        }
+
+        // MARK: - 接收完整存档数据并写入文件
         private func handleSaveArchiveData(message: WKScriptMessage) {
             guard let dict = message.body as? [String: Any],
                   let fileId = dict["fileId"] as? Int,
@@ -221,21 +182,72 @@ struct RPGWebView: UIViewRepresentable {
             let fileURL = saveDir.appendingPathComponent(fileName)
             
             log("📦 收到完整存档: file\(fileId), 长度: \(dataString.count)")
-            let preview = String(dataString.prefix(100))
-            log("📄 数据预览: \(preview)...")
             
-            if dataString.count > 10 {
+            if dataString.count > 100 {
                 do {
                     try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
-                    log("✅ 完整存档保存成功: \(fileName)")
-                    saveTimer?.invalidate()
-                    saveTimer = nil
+                    log("✅ 存档保存成功: \(fileName)")
+                    
+                    // ⭐ 保存成功后进行存储探测
+                    probeGameStorage()
+                    
+                    // 通知 JS 保存完成（可用于 UI 反馈）
+                    webView?.evaluateJavaScript("""
+                    (function() {
+                        if (window._saveCompleteCallback) {
+                            window._saveCompleteCallback(\(fileId));
+                        }
+                    })();
+                    """, completionHandler: nil)
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
             } else {
-                log("⚠️ 数据仍然不完整（长度: \(dataString.count)），可能是占位数据")
+                log("⚠️ 数据不完整（长度: \(dataString.count)），可能是占位数据")
             }
+        }
+
+        // MARK: - 探测游戏存储结构
+        private func probeGameStorage() {
+            guard let webView = webView else { return }
+            
+            let probeScript = """
+            (function() {
+                var info = {};
+                
+                // 检查 StorageManager
+                if (typeof StorageManager !== 'undefined') {
+                    info.StorageManager = '存在';
+                    if (StorageManager.save) info.StorageManager_save = '存在';
+                    if (StorageManager.load) info.StorageManager_load = '存在';
+                    if (StorageManager._data) info.StorageManager_data = '存在';
+                }
+                
+                // 检查 window 上的存档相关变量
+                var saveKeys = ['saveData', '_saveData', 'savefile', 'SaveData', 'SaveFile', 'RPG'];
+                saveKeys.forEach(function(key) {
+                    if (window[key] !== undefined) {
+                        info['window.' + key] = typeof window[key];
+                    }
+                });
+                
+                // 检查 localStorage 所有 RPG 相关的 key
+                var keys = [];
+                for (var i = 0; i < localStorage.length; i++) {
+                    var key = localStorage.key(i);
+                    if (key && key.indexOf('RPG') !== -1) {
+                        var value = localStorage.getItem(key);
+                        keys.push(key + ':' + (value ? value.length : 0));
+                    }
+                }
+                info.localStorage = keys.join(', ');
+                
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                    window.webkit.messageHandlers.debugLog.postMessage('📊 存储探测: ' + JSON.stringify(info));
+                }
+            })();
+            """
+            webView.evaluateJavaScript(probeScript, completionHandler: nil)
         }
 
         // MARK: - 预加载存档到 localStorage
@@ -283,10 +295,14 @@ struct RPGWebView: UIViewRepresentable {
                             self.log("❌ 预加载失败: \(error)")
                         } else {
                             self.log("✅ 预加载完成: \(loadedCount) 个存档")
+                            // ⭐ 预加载完成后进行存储探测
+                            self.probeGameStorage()
                         }
                     }
                 } else {
                     log("📭 没有找到存档文件")
+                    // ⭐ 即使没有存档也进行探测
+                    probeGameStorage()
                 }
             } catch {
                 log("❌ 扫描存档目录失败: \(error)")
@@ -317,44 +333,9 @@ struct RPGWebView: UIViewRepresentable {
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
             }
             
-            // 探测游戏内部存储结构
+            // 延迟 2 秒后进行一次存储探测（确保游戏完全加载）
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                let probeScript = """
-                (function() {
-                    var info = {};
-                    
-                    // 检查 StorageManager
-                    if (typeof StorageManager !== 'undefined') {
-                        info.StorageManager = '存在';
-                        if (StorageManager.save) info.StorageManager_save = '存在';
-                        if (StorageManager.load) info.StorageManager_load = '存在';
-                        if (StorageManager._data) info.StorageManager_data = '存在';
-                    }
-                    
-                    // 检查 window 上的存档相关变量
-                    var saveKeys = ['saveData', '_saveData', 'savefile', 'SaveData', 'SaveFile', 'RPG'];
-                    saveKeys.forEach(function(key) {
-                        if (window[key] !== undefined) {
-                            info['window.' + key] = typeof window[key];
-                        }
-                    });
-                    
-                    // 检查 localStorage 所有 RPG 相关的 key
-                    var keys = [];
-                    for (var i = 0; i < localStorage.length; i++) {
-                        var key = localStorage.key(i);
-                        if (key && key.indexOf('RPG') !== -1) {
-                            keys.push(key + ':' + localStorage.getItem(key).length);
-                        }
-                    }
-                    info.localStorage = keys.join(', ');
-                    
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
-                        window.webkit.messageHandlers.debugLog.postMessage('游戏存储探测: ' + JSON.stringify(info));
-                    }
-                })();
-                """
-                webView.evaluateJavaScript(probeScript, completionHandler: nil)
+                self.probeGameStorage()
             }
         }
 
@@ -380,11 +361,13 @@ struct RPGWebView: UIViewRepresentable {
                 return;
             }
 
-            // 拦截 localStorage.setItem
+            // ========== 拦截 localStorage.setItem ==========
             var originalSetItem = localStorage.setItem;
             localStorage.setItem = function(key, value) {
+                // 先调用原始方法
                 originalSetItem.call(this, key, value);
                 
+                // 如果是 RPG File 相关的 key，通知 Native
                 if (key && key.indexOf('RPG File') === 0) {
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
                         window.webkit.messageHandlers.saveGameFile.postMessage({
@@ -396,7 +379,34 @@ struct RPGWebView: UIViewRepresentable {
                 }
             };
 
-            console.log('✅ 全方位拦截已启动');
+            // ========== 拦截 StorageManager.save ==========
+            var originalSave = StorageManager.save;
+            StorageManager.save = function(savefile) {
+                var result = originalSave.call(this, savefile);
+                
+                // 延迟获取完整数据
+                var fileId = savefile.savefileId || savefile.id || 1;
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
+                    // 发送一个占位消息，触发 Native 去获取完整数据
+                    setTimeout(function() {
+                        var key = 'RPG File' + fileId;
+                        var data = localStorage.getItem(key);
+                        if (data && data.length > 10) {
+                            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveArchiveData) {
+                                window.webkit.messageHandlers.saveArchiveData.postMessage({
+                                    fileId: fileId,
+                                    data: data
+                                });
+                                console.log('📤 完整存档已获取，长度: ' + data.length);
+                            }
+                        }
+                    }, 500);
+                }
+                
+                return result;
+            };
+
+            console.log('✅ 桥接注入完成');
         })();
         """
     }
