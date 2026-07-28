@@ -23,14 +23,25 @@ struct RPGWebView: UIViewRepresentable {
         let contentController = WKUserContentController()
 
         contentController.add(context.coordinator, name: "bridgeReady")
-        contentController.add(context.coordinator, name: "preloadArchives")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
 
-        // ⭐ 关键：在页面加载前注入预加载脚本
+        // ⭐ 关键：在页面加载前直接注入 localStorage 数据
+        let preloadScript = context.coordinator.buildPreloadScript()
+        if !preloadScript.isEmpty {
+            let preloadUserScript = WKUserScript(
+                source: preloadScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            )
+            contentController.addUserScript(preloadUserScript)
+            context.coordinator.log("📦 预加载脚本已注入 (\(preloadScript.components(separatedBy: "localStorage.setItem").count - 1) 个存档)")
+        }
+
+        // 主桥接脚本
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
-            injectionTime: .atDocumentStart,  // 页面加载前执行
+            injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         )
         contentController.addUserScript(bridgeScript)
@@ -43,12 +54,8 @@ struct RPGWebView: UIViewRepresentable {
 
         let indexURL = gamePath.appendingPathComponent("index.html")
         if FileManager.default.fileExists(atPath: indexURL.path) {
-            // ⭐ 加载页面
             webView.loadFileURL(indexURL, allowingReadAccessTo: gamePath)
             context.coordinator.log("✅ 加载 index.html")
-            
-            // ⭐ 立即预加载存档到 localStorage（在页面加载的同时）
-            context.coordinator.preloadArchivesImmediately()
         } else {
             context.coordinator.log("❌ index.html 不存在")
         }
@@ -80,7 +87,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (启动前预加载版) =====")
+            log("===== Bridge 初始化 (硬编码预加载版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -105,8 +112,6 @@ struct RPGWebView: UIViewRepresentable {
             switch message.name {
             case "bridgeReady":
                 log("📨 \(message.body)")
-            case "preloadArchives":
-                handlePreloadArchives()
             case "debugLog":
                 log("🐛 \(message.body)")
             case "saveData":
@@ -142,19 +147,16 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - ⭐ 立即预加载（在页面加载之前）
-        func preloadArchivesImmediately() {
-            log("📦 立即预加载存档（页面加载前）...")
-            
+        // MARK: - ⭐ 构建预加载脚本
+        func buildPreloadScript() -> String {
             let fileManager = FileManager.default
             guard fileManager.fileExists(atPath: saveDir.path) else {
-                log("📭 save 目录不存在")
-                return
+                return ""
             }
             
             do {
                 let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
-                var preloadData: [(key: String, data: String)] = []
+                var scripts: [String] = []
                 
                 for fileURL in files {
                     let fileName = fileURL.lastPathComponent
@@ -163,9 +165,16 @@ struct RPGWebView: UIViewRepresentable {
                         if let fileId = Int(fileIdStr) {
                             do {
                                 let data = try String(contentsOf: fileURL, encoding: .utf8)
+                                // 转义特殊字符
+                                let escapedData = data.replacingOccurrences(of: "\\", with: "\\\\")
+                                                         .replacingOccurrences(of: "'", with: "\\'")
+                                                         .replacingOccurrences(of: "\n", with: "\\n")
+                                                         .replacingOccurrences(of: "\r", with: "\\r")
+                                
                                 let key = "RPG File\(fileId)"
-                                preloadData.append((key, data))
-                                log("📄 预加载: \(key) (\(data.count) 字节)")
+                                let script = "localStorage.setItem('\(key)', '\(escapedData)');"
+                                scripts.append(script)
+                                log("📄 预加载脚本: \(key) (\(data.count) 字节)")
                             } catch {
                                 log("⚠️ 读取文件失败: \(fileName)")
                             }
@@ -173,53 +182,10 @@ struct RPGWebView: UIViewRepresentable {
                     }
                 }
                 
-                if !preloadData.isEmpty {
-                    // ⭐ 存储到内存中，等待 webView 准备好后注入
-                    self.pendingPreloadData = preloadData
-                    log("✅ 已缓存 \(preloadData.count) 个存档，等待注入")
-                } else {
-                    log("📭 没有找到存档文件")
-                }
+                return scripts.joined(separator: " ")
             } catch {
                 log("❌ 扫描存档目录失败: \(error)")
-            }
-        }
-        
-        // ⭐ 存储预加载数据
-        private var pendingPreloadData: [(key: String, data: String)] = []
-
-        // MARK: - 预加载存档（由 JS 触发）
-        private func handlePreloadArchives() {
-            log("📦 JS 触发预加载")
-            
-            guard let webView = webView else {
-                log("❌ webView 不可用")
-                return
-            }
-            
-            // 如果有缓存的数据，立即注入
-            if !pendingPreloadData.isEmpty {
-                var jsScripts: [String] = []
-                for (key, data) in pendingPreloadData {
-                    let escapedData = data.replacingOccurrences(of: "\\", with: "\\\\")
-                                             .replacingOccurrences(of: "'", with: "\\'")
-                                             .replacingOccurrences(of: "\n", with: "\\n")
-                                             .replacingOccurrences(of: "\r", with: "\\r")
-                    let script = "localStorage.setItem('\(key)', '\(escapedData)');"
-                    jsScripts.append(script)
-                }
-                
-                let combinedScript = jsScripts.joined(separator: " ")
-                webView.evaluateJavaScript(combinedScript) { _, error in
-                    if let error = error {
-                        self.log("❌ 注入预加载数据失败: \(error)")
-                    } else {
-                        self.log("✅ 预加载数据注入成功 (\(self.pendingPreloadData.count) 个存档)")
-                        self.pendingPreloadData.removeAll()
-                    }
-                }
-            } else {
-                log("📭 没有缓存的预加载数据")
+                return ""
             }
         }
 
@@ -227,7 +193,6 @@ struct RPGWebView: UIViewRepresentable {
             self.webView = webView
             log("🌐 页面加载完成")
 
-            // 注入桥接
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -235,18 +200,6 @@ struct RPGWebView: UIViewRepresentable {
                 } else {
                     self.log("✅ 桥接注入成功")
                 }
-            }
-
-            // 触发预加载
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                let triggerScript = """
-                (function() {
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.preloadArchives) {
-                        window.webkit.messageHandlers.preloadArchives.postMessage('preload');
-                    }
-                })();
-                """
-                webView.evaluateJavaScript(triggerScript, completionHandler: nil)
             }
         }
 
@@ -264,7 +217,7 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (启动前预加载版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (硬编码预加载版)');
             }
 
             // ==========================================
@@ -318,22 +271,7 @@ struct RPGWebView: UIViewRepresentable {
                 }
             };
 
-            // ==========================================
-            // 在页面加载时，主动检查 localStorage 并更新 StorageManager
-            // ==========================================
-            try {
-                if (typeof StorageManager !== 'undefined' && StorageManager.load) {
-                    for (var i = 1; i <= 5; i++) {
-                        var key = 'RPG File' + i;
-                        var data = localStorage.getItem(key);
-                        if (data && data.length > 100) {
-                            console.log('📤 启动时发现存档: ' + key + ', 长度: ' + data.length);
-                        }
-                    }
-                }
-            } catch(e) {}
-
-            console.log('✅ 启动前预加载版已启动');
+            console.log('✅ 硬编码预加载版已启动');
         })();
         """
     }
