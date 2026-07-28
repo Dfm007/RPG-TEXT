@@ -67,6 +67,8 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
+        private var isWebViewReady = false
+        private var pendingRestore = false
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -152,10 +154,16 @@ struct RPGWebView: UIViewRepresentable {
                 return
             }
             log("📥 收到恢复存档通知")
-            handleRestoreArchive()
+            
+            if isWebViewReady {
+                handleRestoreArchive()
+            } else {
+                log("⏳ WebView 尚未就绪，等待就绪后执行")
+                pendingRestore = true
+            }
         }
 
-        // MARK: - ⭐ 恢复存档（由用户触发）
+        // MARK: - ⭐ 恢复存档
         private func handleRestoreArchive() {
             log("📦 开始恢复存档...")
             
@@ -173,6 +181,7 @@ struct RPGWebView: UIViewRepresentable {
             do {
                 let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
                 var scripts: [String] = []
+                var foundFiles: [String] = []
                 
                 for fileURL in files {
                     let fileName = fileURL.lastPathComponent
@@ -196,6 +205,7 @@ struct RPGWebView: UIViewRepresentable {
                                 })();
                                 """
                                 scripts.append(script)
+                                foundFiles.append(fileName)
                                 log("📄 恢复存档: file\(fileId) (\(data.count) 字节)")
                             } catch {
                                 log("⚠️ 读取文件失败: \(fileName)")
@@ -212,47 +222,36 @@ struct RPGWebView: UIViewRepresentable {
                         } else {
                             self.log("✅ 恢复完成 (\(scripts.count) 个存档)")
                             
-                            // ⭐ 强制刷新游戏场景
+                            // ⭐ 通知 Native 恢复成功
+                            DispatchQueue.main.async {
+                                NotificationCenter.default.post(
+                                    name: NSNotification.Name("RestoreArchiveComplete"),
+                                    object: nil
+                                )
+                            }
+                            
+                            // 刷新游戏
                             let refreshScript = """
                             (function() {
                                 try {
-                                    // 刷新 DataManager
                                     if (typeof DataManager !== 'undefined') {
                                         DataManager.makeSaveContents();
-                                        console.log('✅ DataManager 已刷新');
                                     }
-                                    
-                                    // 刷新当前场景
                                     if (typeof SceneManager !== 'undefined') {
                                         var scene = SceneManager._scene;
                                         if (scene) {
-                                            if (scene.refresh) {
-                                                scene.refresh();
-                                            }
-                                            if (scene.update) {
-                                                scene.update();
-                                            }
-                                            if (scene.createWindowLayer) {
-                                                scene.createWindowLayer();
-                                            }
+                                            if (scene.refresh) scene.refresh();
+                                            if (scene.update) scene.update();
+                                            if (scene.createWindowLayer) scene.createWindowLayer();
                                         }
                                     }
-                                    
-                                    // 如果是标题场景，重新检查存档
                                     if (typeof Scene_Title !== 'undefined') {
                                         var titleScene = SceneManager._scene;
                                         if (titleScene && titleScene.constructor === Scene_Title) {
-                                            if (titleScene.checkContinue) {
-                                                titleScene.checkContinue();
-                                                console.log('✅ 已检查继续游戏');
-                                            }
-                                            if (titleScene.create) {
-                                                titleScene.create();
-                                                console.log('✅ 标题场景已重建');
-                                            }
+                                            if (titleScene.checkContinue) titleScene.checkContinue();
+                                            if (titleScene.create) titleScene.create();
                                         }
                                     }
-                                    
                                     console.log('✅ 游戏刷新完成');
                                 } catch(e) {
                                     console.error('刷新失败:', e);
@@ -272,7 +271,8 @@ struct RPGWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             self.webView = webView
-            log("🌐 页面加载完成")
+            isWebViewReady = true
+            log("🌐 页面加载完成，WebView 已就绪")
 
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
@@ -280,6 +280,15 @@ struct RPGWebView: UIViewRepresentable {
                     self.log("❌ 注入失败: \(error)")
                 } else {
                     self.log("✅ 桥接注入成功")
+                }
+            }
+            
+            // ⭐ 如果有待处理的恢复请求，执行它
+            if pendingRestore {
+                log("🔄 执行待处理的恢复请求")
+                pendingRestore = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.handleRestoreArchive()
                 }
             }
         }
@@ -334,7 +343,6 @@ struct RPGWebView: UIViewRepresentable {
             }
 
             console.log('✅ 恢复存档版已启动');
-            console.log('💡 点击游戏列表的「恢复存档」按钮来恢复存档');
         })();
         """
     }
