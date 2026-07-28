@@ -203,6 +203,91 @@ class GameOverlayManager {
     }
 }
 
+// MARK: - 日志查看器
+struct LogViewer: View {
+    @State private var logContent: String = ""
+    @State private var isLoading = true
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        NavigationView {
+            VStack {
+                if isLoading {
+                    ProgressView("加载日志中...")
+                        .padding()
+                } else if logContent.isEmpty {
+                    VStack(spacing: 20) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 44))
+                            .foregroundColor(.gray)
+                        Text("暂无日志")
+                            .font(.headline)
+                            .foregroundColor(.gray)
+                        Text("请先在游戏中操作，然后重新打开日志")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        Text(logContent)
+                            .font(.system(.body, design: .monospaced))
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .navigationTitle("日志查看器")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    HStack {
+                        Button("复制") {
+                            UIPasteboard.general.string = logContent
+                        }
+                        .disabled(logContent.isEmpty)
+                        
+                        Button("刷新") {
+                            loadLog()
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear {
+            loadLog()
+        }
+    }
+    
+    private func loadLog() {
+        isLoading = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
+            let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+            let logFileURL = docs.appendingPathComponent("bridge_log.txt")
+            
+            var content = ""
+            if fileManager.fileExists(atPath: logFileURL.path) {
+                do {
+                    content = try String(contentsOf: logFileURL, encoding: .utf8)
+                } catch {
+                    content = "读取日志失败: \(error.localizedDescription)"
+                }
+            }
+            
+            DispatchQueue.main.async {
+                logContent = content
+                isLoading = false
+            }
+        }
+    }
+}
+
 // MARK: - 主界面
 struct ContentView: View {
     // 游戏数据
@@ -229,6 +314,9 @@ struct ContentView: View {
     
     // 关于弹窗
     @State private var showAboutAlert = false
+    
+    // 日志查看器
+    @State private var showLogViewer = false
     
     private let saveKey = "GameLibrary"
     private let fileManager = FileManager.default
@@ -260,9 +348,8 @@ struct ContentView: View {
                     }
                     .ignoresSafeArea()
             } else {
-                // ⭐ 主容器：VStack 布局，内容在上，Tab 栏在底部
+                // 主容器
                 VStack(spacing: 0) {
-                    // 内容区域
                     Group {
                         if currentTab == "games" {
                             gamesView
@@ -271,10 +358,9 @@ struct ContentView: View {
                         }
                     }
                     
-                    // ⭐ 底部留白 + Tab 栏
                     VStack(spacing: 0) {
                         Spacer()
-                            .frame(height: 10) // ⭐ 控制 Tab 栏上方的间距（数值越大，Tab 栏越往下移）
+                            .frame(height: 20)
                         customTabBar
                     }
                 }
@@ -343,6 +429,9 @@ struct ContentView: View {
                 pickerGameId = nil
                 refreshID = UUID()
             })
+        }
+        .sheet(isPresented: $showLogViewer) {
+            LogViewer()
         }
         .onAppear {
             loadGames()
@@ -475,6 +564,21 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                
+                // ⭐ 查看日志选项
+                Button {
+                    showLogViewer = true
+                } label: {
+                    HStack {
+                        Text("查看日志")
+                            .font(.body)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                }
+                .buttonStyle(.plain)
             }
             .listStyle(.plain)
         }
@@ -546,10 +650,9 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
     
-    // MARK: - 自定义底部 Tab 栏（缩小并下移）
+    // MARK: - 自定义底部 Tab 栏
     private var customTabBar: some View {
         HStack(spacing: 0) {
-            // 游戏按钮
             Button {
                 withAnimation { currentTab = "games" }
             } label: {
@@ -567,7 +670,6 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             
-            // 设置按钮
             Button {
                 withAnimation { currentTab = "settings" }
             } label: {
