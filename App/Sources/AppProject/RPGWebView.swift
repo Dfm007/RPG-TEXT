@@ -22,11 +22,9 @@ struct RPGWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
 
-        // 注册消息处理器
         contentController.add(context.coordinator, name: "saveGameFile")
-        contentController.add(context.coordinator, name: "loadGameFile")
         contentController.add(context.coordinator, name: "bridgeReady")
-        contentController.add(context.coordinator, name: "checkSaveExists")
+        contentController.add(context.coordinator, name: "preloadArchives") // 新增：预加载存档列表
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -101,18 +99,16 @@ struct RPGWebView: UIViewRepresentable {
             switch message.name {
             case "saveGameFile":
                 handleSave(message: message)
-            case "loadGameFile":
-                handleLoad(message: message)
             case "bridgeReady":
                 log("📨 \(message.body)")
-            case "checkSaveExists":
-                handleCheckExists(message: message)
+            case "preloadArchives":
+                handlePreloadArchives(message: message)
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
         }
 
-        // MARK: - 保存存档（透传）
+        // MARK: - 保存存档
         private func handleSave(message: WKScriptMessage) {
             guard let dict = message.body as? [String: Any],
                   let fileId = dict["fileId"] as? Int,
@@ -128,89 +124,66 @@ struct RPGWebView: UIViewRepresentable {
             do {
                 try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
                 log("✅ 写入成功: \(fileName)")
-                
-                // 回调 JS 确认保存成功
-                if let webView = webView {
-                    let callback = "window._saveCallback && window._saveCallback(\(fileId), true);"
-                    webView.evaluateJavaScript(callback, completionHandler: nil)
-                }
             } catch {
                 log("❌ 写入失败: \(error)")
-                if let webView = webView {
-                    let callback = "window._saveCallback && window._saveCallback(\(fileId), false);"
-                    webView.evaluateJavaScript(callback, completionHandler: nil)
-                }
             }
         }
 
-        // MARK: - 加载存档（透传）
-        private func handleLoad(message: WKScriptMessage) {
-            guard let dict = message.body as? [String: Any],
-                  let fileId = dict["fileId"] as? Int,
-                  let callbackId = dict["callbackId"] as? String else {
-                log("⚠️ 加载消息格式错误: \(message.body)")
+        // MARK: - 预加载存档到 localStorage
+        private func handlePreloadArchives(message: WKScriptMessage) {
+            log("📦 预加载存档到 localStorage")
+            
+            guard let webView = webView else {
+                log("❌ webView 不可用")
                 return
             }
             
-            let fileName = "file\(fileId).rpgsave"
-            let fileURL = saveDir.appendingPathComponent(fileName)
-            
-            log("📖 加载存档 ID: \(fileId)")
-            
-            var dataString: String?
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                do {
-                    dataString = try String(contentsOf: fileURL, encoding: .utf8)
-                    log("✅ 读取成功: \(fileName), 长度: \(dataString?.count ?? 0)")
-                } catch {
-                    log("❌ 读取文件失败: \(error)")
+            do {
+                let files = try FileManager.default.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
+                var loadedCount = 0
+                var jsScripts: [String] = []
+                
+                for fileURL in files {
+                    let fileName = fileURL.lastPathComponent
+                    if fileName.hasPrefix("file") && fileName.hasSuffix(".rpgsave") {
+                        // 提取 fileId
+                        let fileIdStr = fileName.replacingOccurrences(of: "file", with: "").replacingOccurrences(of: ".rpgsave", with: "")
+                        if let fileId = Int(fileIdStr) {
+                            do {
+                                let data = try String(contentsOf: fileURL, encoding: .utf8)
+                                // 转义特殊字符
+                                let escapedData = data.replacingOccurrences(of: "\\", with: "\\\\")
+                                                         .replacingOccurrences(of: "'", with: "\\'")
+                                                         .replacingOccurrences(of: "\n", with: "\\n")
+                                                         .replacingOccurrences(of: "\r", with: "\\r")
+                                
+                                let key = "RPG File\(fileId)"
+                                let script = "localStorage.setItem('\(key)', '\(escapedData)');"
+                                jsScripts.append(script)
+                                loadedCount += 1
+                                log("📄 预加载: \(key) (\(data.count) 字节)")
+                            } catch {
+                                log("⚠️ 读取文件失败: \(fileName)")
+                            }
+                        }
+                    }
                 }
-            } else {
-                log("⚠️ 文件不存在: \(fileName)")
-            }
-            
-            // 回调 JS（透传数据）
-            if let webView = webView {
-                let escapedData = dataString?.replacingOccurrences(of: "\\", with: "\\\\")
-                                                   .replacingOccurrences(of: "'", with: "\\'") ?? ""
-                let jsCallback = """
-                (function() {
-                    if (window._loadCallbacks && window._loadCallbacks['\(callbackId)']) {
-                        window._loadCallbacks['\(callbackId)']('\(escapedData)');
-                        delete window._loadCallbacks['\(callbackId)'];
+                
+                // 批量执行 JavaScript
+                if !jsScripts.isEmpty {
+                    let combinedScript = jsScripts.joined(separator: " ")
+                    webView.evaluateJavaScript(combinedScript) { _, error in
+                        if let error = error {
+                            self.log("❌ 预加载失败: \(error)")
+                        } else {
+                            self.log("✅ 预加载完成: \(loadedCount) 个存档")
+                        }
                     }
-                })();
-                """
-                webView.evaluateJavaScript(jsCallback, completionHandler: { _, error in
-                    if let error = error {
-                        self.log("❌ 回调 JS 失败: \(error)")
-                    }
-                })
-            }
-        }
-
-        // MARK: - 检查存档是否存在
-        private func handleCheckExists(message: WKScriptMessage) {
-            guard let dict = message.body as? [String: Any],
-                  let fileId = dict["fileId"] as? Int,
-                  let callbackId = dict["callbackId"] as? String else {
-                return
-            }
-            
-            let fileName = "file\(fileId).rpgsave"
-            let fileURL = saveDir.appendingPathComponent(fileName)
-            let exists = FileManager.default.fileExists(atPath: fileURL.path)
-            
-            if let webView = webView {
-                let jsCallback = """
-                (function() {
-                    if (window._existsCallbacks && window._existsCallbacks['\(callbackId)']) {
-                        window._existsCallbacks['\(callbackId)'](\(exists));
-                        delete window._existsCallbacks['\(callbackId)'];
-                    }
-                })();
-                """
-                webView.evaluateJavaScript(jsCallback, completionHandler: nil)
+                } else {
+                    log("📭 没有找到存档文件")
+                }
+            } catch {
+                log("❌ 扫描存档目录失败: \(error)")
             }
         }
 
@@ -218,7 +191,7 @@ struct RPGWebView: UIViewRepresentable {
             self.webView = webView
             log("🌐 页面加载完成")
 
-            // 重新注入桥接
+            // 注入桥接
             let script = RPGWebView.bridgeJavaScript()
             webView.evaluateJavaScript(script) { _, error in
                 if let error = error {
@@ -228,32 +201,33 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
 
-            // 延迟再次注入确保覆盖
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                webView.evaluateJavaScript(script) { _, error in
-                    if let error = error {
-                        self.log("❌ 延迟注入失败: \(error)")
-                    } else {
-                        self.log("✅ 延迟注入成功")
+            // 延迟预加载存档
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                // 先检查是否有需要预加载的存档
+                let checkScript = """
+                (function() {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.preloadArchives) {
+                        window.webkit.messageHandlers.preloadArchives.postMessage('preload');
                     }
-                }
+                })();
+                """
+                webView.evaluateJavaScript(checkScript, completionHandler: nil)
                 
                 // 检查注入状态
-                let checkScript = """
+                let statusScript = """
                 (function() {
                     var status = '未定义';
                     if (typeof StorageManager !== 'undefined') {
                         status = '已定义';
                         if (StorageManager.save) status += ', save已覆盖';
-                        if (StorageManager.load) status += ', load已覆盖';
-                        if (StorageManager.exists) status += ', exists已覆盖';
+                        if (StorageManager.load) status += ', load未覆盖(原生)';
                     }
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
                         window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager: ' + status);
                     }
                 })();
                 """
-                webView.evaluateJavaScript(checkScript, completionHandler: nil)
+                webView.evaluateJavaScript(statusScript, completionHandler: nil)
             }
         }
 
@@ -266,7 +240,7 @@ struct RPGWebView: UIViewRepresentable {
         }
     }
 
-    // MARK: - JavaScript 桥接（完全透传）
+    // MARK: - JavaScript 桥接
     private static func bridgeJavaScript() -> String {
         return """
         (function() {
@@ -276,131 +250,55 @@ struct RPGWebView: UIViewRepresentable {
 
             if (typeof StorageManager === 'undefined') {
                 console.warn('StorageManager not found');
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                    window.webkit.messageHandlers.bridgeReady.postMessage('StorageManager 未定义');
-                }
                 return;
             }
 
-            // 保存原始方法（用于回退）
+            // 保存原始方法
             var originalSave = StorageManager.save;
             var originalLoad = StorageManager.load;
-            var originalExists = StorageManager.exists;
 
-            // 回调管理
-            window._loadCallbacks = {};
-            window._existsCallbacks = {};
-            window._saveCallback = null;
-
-            // ========== 重写 save（完全透传） ==========
+            // ========== 重写 save（保存到 localStorage + 备份到文件） ==========
             StorageManager.save = function(savefile) {
-                var fileId = savefile.savefileId || 1;
-                var data = JSON.stringify(savefile);
+                // 先调用原始 save，更新 localStorage
+                var result = originalSave.call(this, savefile);
                 
-                // 发送给 Native 保存
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
-                    // 使用同步回调方式
-                    var saved = false;
-                    window._saveCallback = function(id, success) {
-                        saved = success;
-                    };
-                    
+                // 从 localStorage 读取完整数据，备份到文件
+                var fileId = savefile.savefileId || 1;
+                var key = "RPG File" + fileId;
+                var data = localStorage.getItem(key);
+                
+                if (data && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveGameFile) {
                     window.webkit.messageHandlers.saveGameFile.postMessage({
                         fileId: fileId,
                         data: data
                     });
-                    
-                    // 注意：这里无法同步等待，所以仍然写入 localStorage 作为备份
-                    // 但主要存储由 Native 负责
-                    console.log('📤 存档已发送到 Native，ID: ' + fileId);
-                } else {
-                    console.warn('Native bridge not available, fallback to localStorage');
-                    return originalSave.call(this, savefile);
+                    console.log('📤 存档已备份到文件，ID: ' + fileId);
                 }
-
-                // 仍然更新 localStorage（保持游戏内一致性）
-                return originalSave.call(this, savefile);
+                
+                return result;
             };
 
-            // ========== 重写 load（从文件读取，完全透传） ==========
-            StorageManager.load = function(savefileId) {
-                var callbackId = 'load_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-                
-                return new Promise(function(resolve, reject) {
-                    // 超时处理（5秒）
-                    var timeout = setTimeout(function() {
-                        console.warn('加载存档超时，使用 localStorage 回退');
-                        var result = originalLoad.call(StorageManager, savefileId);
-                        resolve(result);
-                    }, 5000);
+            // ========== load 不重写，保持原生 ==========
+            // 游戏从 localStorage 读取，而 localStorage 在启动时已被预加载
 
-                    window._loadCallbacks[callbackId] = function(dataString) {
-                        clearTimeout(timeout);
-                        if (dataString && dataString !== '') {
-                            try {
-                                // 透传：直接解析 JSON
-                                var savefile = JSON.parse(dataString);
-                                // 写入 localStorage 保持缓存一致
-                                var key = "RPG File" + savefileId;
-                                localStorage.setItem(key, dataString);
-                                console.log('✅ 加载成功，ID: ' + savefileId + ', 数据长度: ' + dataString.length);
-                                resolve(savefile);
-                            } catch (e) {
-                                console.error('解析存档数据失败:', e);
-                                // 回退到原始方法
-                                var result = originalLoad.call(StorageManager, savefileId);
-                                resolve(result);
-                            }
-                        } else {
-                            console.warn('存档文件不存在或为空，使用 localStorage 回退');
-                            var result = originalLoad.call(StorageManager, savefileId);
-                            resolve(result);
-                        }
-                    };
-
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadGameFile) {
-                        window.webkit.messageHandlers.loadGameFile.postMessage({
-                            fileId: savefileId,
-                            callbackId: callbackId
-                        });
-                        console.log('📤 请求加载存档 ID: ' + savefileId);
-                    } else {
-                        console.warn('Native bridge 不可用，使用原始方法');
-                        var result = originalLoad.call(StorageManager, savefileId);
-                        resolve(result);
+            // ========== 预加载触发 ==========
+            // 页面加载完成后，通知 Native 预加载存档
+            if (document.readyState === 'complete') {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.preloadArchives) {
+                    window.webkit.messageHandlers.preloadArchives.postMessage('preload');
+                }
+            } else {
+                document.addEventListener('DOMContentLoaded', function() {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.preloadArchives) {
+                        window.webkit.messageHandlers.preloadArchives.postMessage('preload');
                     }
                 });
-            };
-
-            // ========== 重写 exists（检查文件是否存在） ==========
-            if (StorageManager.exists) {
-                StorageManager.exists = function(savefileId) {
-                    var callbackId = 'exists_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-                    
-                    return new Promise(function(resolve) {
-                        window._existsCallbacks[callbackId] = function(exists) {
-                            console.log('检查存档 ' + savefileId + ': ' + (exists ? '存在' : '不存在'));
-                            resolve(exists);
-                        };
-
-                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.checkSaveExists) {
-                            window.webkit.messageHandlers.checkSaveExists.postMessage({
-                                fileId: savefileId,
-                                callbackId: callbackId
-                            });
-                        } else {
-                            // 回退到 localStorage
-                            var key = "RPG File" + savefileId;
-                            resolve(localStorage.getItem(key) !== null);
-                        }
-                    });
-                };
             }
 
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('✅ StorageManager 已覆盖（文件透传模式）');
+                window.webkit.messageHandlers.bridgeReady.postMessage('✅ 桥接注入完成（预加载模式）');
             }
-            console.log('✅ 桥接注入完成 - 文件透传模式');
+            console.log('✅ 桥接注入完成 - 预加载模式');
         })();
         """
     }
