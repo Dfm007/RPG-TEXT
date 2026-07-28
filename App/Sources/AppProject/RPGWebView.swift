@@ -67,8 +67,6 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var saveTimers: [Int: Timer] = [:]
-        private var hasLoadedSave = false
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -77,7 +75,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (RPG Maker MZ 专用) =====")
+            log("===== Bridge 初始化 (DataManager 拦截版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -131,56 +129,64 @@ struct RPGWebView: UIViewRepresentable {
                 do {
                     try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
                     log("✅ 保存成功: \(fileName)")
-                    hasLoadedSave = true
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
             } else {
-                log("⚠️ 数据过小 (\(dataString.count) 字节)，可能是空存档，忽略")
+                log("⚠️ 数据过小 (\(dataString.count) 字节)")
             }
         }
 
-        // MARK: - ⭐ 核心：从 StorageManager._data 提取所有存档
-        private func extractAllArchives() {
+        // MARK: - 提取存档数据
+        private func extractArchive() {
             guard let webView = webView else {
                 log("❌ webView 不可用")
                 return
             }
             
-            log("🔍 从 StorageManager._data 提取所有存档")
-            
             let script = """
             (function() {
                 var result = {};
                 
+                // 1. 从 StorageManager._data 提取
                 try {
-                    // 直接读取 StorageManager._data（RPG Maker MZ 内部存储）
                     if (typeof StorageManager !== 'undefined' && StorageManager._data) {
                         var data = StorageManager._data;
-                        if (data) {
-                            // 遍历所有存档
-                            for (var key in data) {
-                                if (key.indexOf('file') === 0) {
-                                    var fileId = parseInt(key.replace('file', ''));
-                                    if (!isNaN(fileId)) {
-                                        var saveData = data[key];
-                                        if (saveData) {
-                                            var jsonData = JSON.stringify(saveData);
-                                            if (jsonData && jsonData.length > 100) {
-                                                result[fileId] = jsonData;
-                                                console.log('📤 提取存档 file' + fileId + '，长度: ' + jsonData.length);
-                                            }
-                                        }
+                        for (var key in data) {
+                            if (key.indexOf('file') === 0) {
+                                var fileId = parseInt(key.replace('file', ''));
+                                if (!isNaN(fileId) && data[key]) {
+                                    var jsonData = JSON.stringify(data[key]);
+                                    if (jsonData && jsonData.length > 100) {
+                                        result[fileId] = jsonData;
+                                        console.log('📤 从 _data 提取 file' + fileId + '，长度: ' + jsonData.length);
                                     }
                                 }
                             }
                         }
                     }
-                } catch(e) {
-                    console.error('提取存档失败:', e);
+                } catch(e) {}
+                
+                // 2. 如果 _data 没有数据，尝试从 localStorage 提取
+                if (Object.keys(result).length === 0) {
+                    try {
+                        for (var i = 0; i < localStorage.length; i++) {
+                            var key = localStorage.key(i);
+                            if (key && key.indexOf('RPG File') === 0) {
+                                var value = localStorage.getItem(key);
+                                if (value && value.length > 100) {
+                                    var fileId = parseInt(key.replace('RPG File', ''));
+                                    if (!isNaN(fileId)) {
+                                        result[fileId] = value;
+                                        console.log('📤 从 localStorage 提取 ' + key + '，长度: ' + value.length);
+                                    }
+                                }
+                            }
+                        }
+                    } catch(e) {}
                 }
                 
-                // 发送给 Native
+                // 3. 发送给 Native
                 for (var fileId in result) {
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
                         window.webkit.messageHandlers.saveData.postMessage({
@@ -190,26 +196,8 @@ struct RPGWebView: UIViewRepresentable {
                     }
                 }
                 
-                // 如果没有提取到任何存档，尝试从 localStorage 读取
                 if (Object.keys(result).length === 0) {
-                    try {
-                        for (var i = 0; i < localStorage.length; i++) {
-                            var key = localStorage.key(i);
-                            if (key && key.indexOf('RPG File') === 0) {
-                                var value = localStorage.getItem(key);
-                                if (value && value.length > 100) {
-                                    var fileId = parseInt(key.replace('RPG File', ''));
-                                    if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                                        window.webkit.messageHandlers.saveData.postMessage({
-                                            fileId: fileId,
-                                            data: value
-                                        });
-                                        console.log('📤 从 localStorage 提取: ' + key + ', 长度: ' + value.length);
-                                    }
-                                }
-                            }
-                        }
-                    } catch(e) {}
+                    console.log('📭 未找到任何存档数据');
                 }
             })();
             """
@@ -261,9 +249,9 @@ struct RPGWebView: UIViewRepresentable {
                             self.log("❌ 预加载失败: \(error)")
                         } else {
                             self.log("✅ 预加载完成: \(loadedCount) 个存档")
-                            // 预加载后，从 StorageManager._data 提取存档
+                            // 预加载后尝试提取存档
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                self.extractAllArchives()
+                                self.extractArchive()
                             }
                         }
                     }
@@ -288,7 +276,6 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
 
-            // 延迟预加载
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 let triggerScript = """
                 (function() {
@@ -300,22 +287,11 @@ struct RPGWebView: UIViewRepresentable {
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
             }
             
-            // ⭐ 启动定时轮询，每 5 秒检查一次是否有新存档
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
-                self.startPolling()
-            }
-        }
-        
-        // MARK: - ⭐ 定时轮询
-        private func startPolling() {
-            log("🔄 启动定时轮询 (每 5 秒检查一次)")
-            
-            Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] timer in
-                guard let self = self else {
-                    timer.invalidate()
-                    return
+            // 定时提取（每 3 秒）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+                    self?.extractArchive()
                 }
-                self.extractAllArchives()
             }
         }
 
@@ -333,62 +309,75 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (RPG Maker MZ)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (DataManager拦截)');
             }
 
             // ==========================================
-            // RPG Maker MZ 专用拦截
+            // 1. 拦截 StorageManager.save
             // ==========================================
-            
-            if (typeof StorageManager === 'undefined') {
-                console.warn('StorageManager 未定义');
-                return;
-            }
-
-            // ⭐ 拦截 StorageManager.save
-            var originalSave = StorageManager.save;
-            StorageManager.save = function(savefile) {
-                console.log('📤 StorageManager.save 被调用');
-                var result = originalSave.call(this, savefile);
-                
-                // 保存后立即从 _data 提取
-                var fileId = savefile.savefileId || savefile.id || 1;
-                
-                // 延迟 300ms 后从 _data 读取
-                setTimeout(function() {
-                    try {
-                        if (StorageManager._data) {
-                            var data = StorageManager._data;
-                            var key = 'file' + fileId;
-                            if (data[key]) {
-                                var jsonData = JSON.stringify(data[key]);
-                                if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                                    window.webkit.messageHandlers.saveData.postMessage({
-                                        fileId: fileId,
-                                        data: jsonData
-                                    });
-                                    console.log('📤 从 _data 提取存档成功，长度: ' + jsonData.length);
+            if (typeof StorageManager !== 'undefined') {
+                var originalSave = StorageManager.save;
+                StorageManager.save = function(savefile) {
+                    console.log('📤 StorageManager.save 被调用');
+                    var result = originalSave.call(this, savefile);
+                    
+                    // 延迟后提取数据
+                    setTimeout(function() {
+                        try {
+                            if (StorageManager._data) {
+                                var fileId = savefile.savefileId || savefile.id || 1;
+                                var key = 'file' + fileId;
+                                if (StorageManager._data[key]) {
+                                    var jsonData = JSON.stringify(StorageManager._data[key]);
+                                    if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                        window.webkit.messageHandlers.saveData.postMessage({
+                                            fileId: fileId,
+                                            data: jsonData
+                                        });
+                                        console.log('📤 StorageManager.save 数据已发送');
+                                    }
                                 }
                             }
-                        }
-                    } catch(e) {
-                        console.error('提取失败:', e);
-                    }
-                }, 300);
-                
-                return result;
-            };
+                        } catch(e) {}
+                    }, 200);
+                    
+                    return result;
+                };
+            }
 
-            // ⭐ 拦截 localStorage.setItem
-            var originalSetItem = localStorage.setItem;
-            localStorage.setItem = function(key, value) {
-                originalSetItem.call(this, key, value);
-                if (key && key.indexOf('RPG File') === 0) {
-                    console.log('📤 localStorage.setItem: ' + key + ', 长度: ' + (value ? value.length : 0));
-                }
-            };
+            // ==========================================
+            // 2. 拦截 DataManager.saveGame
+            // ==========================================
+            if (typeof DataManager !== 'undefined') {
+                var originalSaveGame = DataManager.saveGame;
+                DataManager.saveGame = function(savefileId) {
+                    console.log('📤 DataManager.saveGame 被调用, ID: ' + savefileId);
+                    var result = originalSaveGame.call(this, savefileId);
+                    
+                    // 延迟后从 StorageManager._data 提取
+                    setTimeout(function() {
+                        try {
+                            if (typeof StorageManager !== 'undefined' && StorageManager._data) {
+                                var key = 'file' + savefileId;
+                                if (StorageManager._data[key]) {
+                                    var jsonData = JSON.stringify(StorageManager._data[key]);
+                                    if (jsonData && jsonData.length > 100 && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                        window.webkit.messageHandlers.saveData.postMessage({
+                                            fileId: savefileId,
+                                            data: jsonData
+                                        });
+                                        console.log('📤 DataManager.saveGame 数据已发送');
+                                    }
+                                }
+                            }
+                        } catch(e) {}
+                    }, 300);
+                    
+                    return result;
+                };
+            }
 
-            console.log('✅ RPG Maker MZ 桥接注入完成');
+            console.log('✅ DataManager 拦截版已启动');
         })();
         """
     }
