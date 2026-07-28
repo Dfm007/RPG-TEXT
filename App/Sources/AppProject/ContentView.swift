@@ -242,42 +242,48 @@ struct ContentView: View {
         }
     }
     
-    var body: some View {
-        ZStack {
-            if let game = selectedGame {
-                Color.clear
-                    .onAppear {
-                        GameOverlayManager.shared.showGame(
-                            folderURL: getLocalGameURL(for: game),
-                            gameId: game.id,
-                            onExit: {
-                                selectedGame = nil
-                            }
-                        )
-                    }
-                    .onDisappear {
-                        GameOverlayManager.shared.hideGame()
-                    }
-                    .ignoresSafeArea()
-            } else {
-                // 主容器：使用 VStack 布局，底部留空给 Tab 栏
-                VStack(spacing: 0) {
-                    // 内容区域
-                    Group {
-                        if currentTab == "games" {
-                            gamesView
-                        } else {
-                            settingsView
+var body: some View {
+    ZStack {
+        if let game = selectedGame {
+            Color.clear
+                .onAppear {
+                    GameOverlayManager.shared.showGame(
+                        folderURL: getLocalGameURL(for: game),
+                        gameId: game.id,
+                        onExit: {
+                            selectedGame = nil
                         }
+                    )
+                }
+                .onDisappear {
+                    GameOverlayManager.shared.hideGame()
+                }
+                .ignoresSafeArea()
+        } else {
+            // ⭐ 主容器：使用 VStack，内容 + 底部留白
+            VStack(spacing: 0) {
+                // 内容区域（游戏列表或设置）
+                Group {
+                    if currentTab == "games" {
+                        gamesView
+                    } else {
+                        settingsView
                     }
-                    
-                    // ⭐ 使用 Spacer 将 Tab 栏推到底部，但通过 padding 控制上移距离
-                    // 这里不再使用 overlay，而是直接放在 VStack 中
+                }
+                
+                // ⭐ 底部 Tab 栏 - 用 Spacer 和 padding 控制位置
+                VStack(spacing: 0) {
+                    Spacer()
+                        .frame(height: 20) // ⭐ 控制 Tab 栏上方的间距
                     customTabBar
-                        .padding(.bottom, 30) // ⭐ 控制 Tab 栏距离屏幕底部的距离
                 }
             }
         }
+    }
+    // ... 其他 modifiers ...
+}
+
+        
         .fileImporter(
             isPresented: $showImporter,
             allowedContentTypes: [.zip, .apk],
