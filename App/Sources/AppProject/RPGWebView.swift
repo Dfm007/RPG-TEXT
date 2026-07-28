@@ -79,7 +79,6 @@ struct RPGWebView: UIViewRepresentable {
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
             
-            // ⭐ 监听恢复存档通知
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(handleRestoreNotification(_:)),
@@ -145,7 +144,7 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - ⭐ 接收恢复存档通知
+        // MARK: - 接收恢复存档通知
         @objc func handleRestoreNotification(_ notification: Notification) {
             guard let userInfo = notification.userInfo,
                   let gamePath = userInfo["gamePath"] as? URL,
@@ -174,7 +173,6 @@ struct RPGWebView: UIViewRepresentable {
             do {
                 let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
                 var scripts: [String] = []
-                var foundFiles: [String] = []
                 
                 for fileURL in files {
                     let fileName = fileURL.lastPathComponent
@@ -198,7 +196,6 @@ struct RPGWebView: UIViewRepresentable {
                                 })();
                                 """
                                 scripts.append(script)
-                                foundFiles.append(fileName)
                                 log("📄 恢复存档: file\(fileId) (\(data.count) 字节)")
                             } catch {
                                 log("⚠️ 读取文件失败: \(fileName)")
@@ -215,27 +212,48 @@ struct RPGWebView: UIViewRepresentable {
                         } else {
                             self.log("✅ 恢复完成 (\(scripts.count) 个存档)")
                             
-                            // ⭐ 刷新游戏界面
+                            // ⭐ 强制刷新游戏场景
                             let refreshScript = """
                             (function() {
                                 try {
-                                    // 刷新场景
-                                    if (typeof SceneManager !== 'undefined' && SceneManager._scene) {
-                                        var scene = SceneManager._scene;
-                                        if (scene && scene.refresh) {
-                                            scene.refresh();
-                                            console.log('✅ 场景已刷新');
-                                        }
-                                    }
-                                    // 刷新存档列表
+                                    // 刷新 DataManager
                                     if (typeof DataManager !== 'undefined') {
                                         DataManager.makeSaveContents();
-                                        console.log('✅ 存档列表已刷新');
+                                        console.log('✅ DataManager 已刷新');
                                     }
-                                    // 触发事件
-                                    if (typeof $gameSystem !== 'undefined') {
-                                        $gameSystem.onAfterLoad();
+                                    
+                                    // 刷新当前场景
+                                    if (typeof SceneManager !== 'undefined') {
+                                        var scene = SceneManager._scene;
+                                        if (scene) {
+                                            if (scene.refresh) {
+                                                scene.refresh();
+                                            }
+                                            if (scene.update) {
+                                                scene.update();
+                                            }
+                                            if (scene.createWindowLayer) {
+                                                scene.createWindowLayer();
+                                            }
+                                        }
                                     }
+                                    
+                                    // 如果是标题场景，重新检查存档
+                                    if (typeof Scene_Title !== 'undefined') {
+                                        var titleScene = SceneManager._scene;
+                                        if (titleScene && titleScene.constructor === Scene_Title) {
+                                            if (titleScene.checkContinue) {
+                                                titleScene.checkContinue();
+                                                console.log('✅ 已检查继续游戏');
+                                            }
+                                            if (titleScene.create) {
+                                                titleScene.create();
+                                                console.log('✅ 标题场景已重建');
+                                            }
+                                        }
+                                    }
+                                    
+                                    console.log('✅ 游戏刷新完成');
                                 } catch(e) {
                                     console.error('刷新失败:', e);
                                 }
@@ -287,17 +305,12 @@ struct RPGWebView: UIViewRepresentable {
                 window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (恢复存档版)');
             }
 
-            // ==========================================
-            // 拦截 StorageManager.save
-            // ==========================================
             if (typeof StorageManager !== 'undefined') {
                 var originalSave = StorageManager.save;
                 StorageManager.save = function(savefile) {
-                    // 先执行原始保存
                     var result = originalSave.call(this, savefile);
                     var fileId = savefile.savefileId || savefile.id || 1;
                     
-                    // 延迟从 localStorage 读取数据并发送给 Native
                     setTimeout(function() {
                         try {
                             var key = 'RPG File' + fileId;
