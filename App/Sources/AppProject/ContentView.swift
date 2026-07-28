@@ -207,6 +207,7 @@ class GameOverlayManager {
 struct LogViewer: View {
     @State private var logContent: String = ""
     @State private var isLoading = true
+    @State private var showClearConfirmation = false
     @Environment(\.dismiss) var dismiss
     
     var body: some View {
@@ -252,11 +253,24 @@ struct LogViewer: View {
                         }
                         .disabled(logContent.isEmpty)
                         
+                        Button("清空") {
+                            showClearConfirmation = true
+                        }
+                        .disabled(logContent.isEmpty)
+                        
                         Button("刷新") {
                             loadLog()
                         }
                     }
                 }
+            }
+            .alert("确认清空", isPresented: $showClearConfirmation) {
+                Button("确定", role: .destructive) {
+                    clearLog()
+                }
+                Button("取消", role: .cancel) { }
+            } message: {
+                Text("确定要清空所有日志吗？")
             }
         }
         .onAppear {
@@ -284,6 +298,19 @@ struct LogViewer: View {
                 logContent = content
                 isLoading = false
             }
+        }
+    }
+    
+    private func clearLog() {
+        let fileManager = FileManager.default
+        let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let logFileURL = docs.appendingPathComponent("bridge_log.txt")
+        
+        do {
+            try "".write(to: logFileURL, atomically: true, encoding: .utf8)
+            logContent = ""
+        } catch {
+            logContent = "清空日志失败: \(error.localizedDescription)"
         }
     }
 }
@@ -565,7 +592,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 
-                // ⭐ 查看日志选项
+                // 查看日志选项
                 Button {
                     showLogViewer = true
                 } label: {
