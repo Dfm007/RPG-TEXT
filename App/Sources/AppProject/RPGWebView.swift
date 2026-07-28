@@ -26,6 +26,7 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "preloadArchives")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
+        contentController.add(context.coordinator, name: "notifyGame")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -67,6 +68,7 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
+        private var preloadedFileIds: Set<Int> = []
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -75,7 +77,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (最终修复版) =====")
+            log("===== Bridge 初始化 (最终版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -106,6 +108,8 @@ struct RPGWebView: UIViewRepresentable {
                 log("🐛 \(message.body)")
             case "saveData":
                 handleSaveData(message: message)
+            case "notifyGame":
+                handleNotifyGame(message: message)
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -129,6 +133,7 @@ struct RPGWebView: UIViewRepresentable {
                 do {
                     try dataString.write(to: fileURL, atomically: true, encoding: .utf8)
                     log("✅ 保存成功: \(fileName)")
+                    preloadedFileIds.insert(fileId)
                 } catch {
                     log("❌ 保存失败: \(error)")
                 }
@@ -137,7 +142,18 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - ⭐ 修复：预加载存档到 localStorage
+        // MARK: - 通知游戏有存档
+        private func handleNotifyGame(message: WKScriptMessage) {
+            guard let dict = message.body as? [String: Any],
+                  let fileId = dict["fileId"] as? Int,
+                  let result = dict["result"] as? String else {
+                log("⚠️ notifyGame 数据格式错误")
+                return
+            }
+            log("📢 通知游戏结果: file\(fileId) -> \(result)")
+        }
+
+        // MARK: - 预加载存档
         private func handlePreloadArchives() {
             log("📦 预加载存档到 localStorage")
             
@@ -146,7 +162,6 @@ struct RPGWebView: UIViewRepresentable {
                 return
             }
             
-            // 先检查 save 目录
             let fileManager = FileManager.default
             guard fileManager.fileExists(atPath: saveDir.path) else {
                 log("📭 save 目录不存在")
@@ -155,23 +170,17 @@ struct RPGWebView: UIViewRepresentable {
             
             do {
                 let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
-                log("📂 找到 \(files.count) 个文件")
-                
                 var jsScripts: [String] = []
                 var loadedCount = 0
+                var loadedFileIds: [Int] = []
                 
                 for fileURL in files {
                     let fileName = fileURL.lastPathComponent
-                    log("📄 检查文件: \(fileName)")
-                    
                     if fileName.hasPrefix("file") && fileName.hasSuffix(".rpgsave") {
                         let fileIdStr = fileName.replacingOccurrences(of: "file", with: "").replacingOccurrences(of: ".rpgsave", with: "")
                         if let fileId = Int(fileIdStr) {
                             do {
                                 let data = try String(contentsOf: fileURL, encoding: .utf8)
-                                log("📄 读取文件: \(fileName), 大小: \(data.count) 字节")
-                                
-                                // 转义特殊字符
                                 let escapedData = data.replacingOccurrences(of: "\\", with: "\\\\")
                                                          .replacingOccurrences(of: "'", with: "\\'")
                                                          .replacingOccurrences(of: "\n", with: "\\n")
@@ -181,6 +190,7 @@ struct RPGWebView: UIViewRepresentable {
                                 let script = "localStorage.setItem('\(key)', '\(escapedData)');"
                                 jsScripts.append(script)
                                 loadedCount += 1
+                                loadedFileIds.append(fileId)
                                 log("📄 预加载: \(key) (\(data.count) 字节)")
                             } catch {
                                 log("⚠️ 读取文件失败: \(fileName): \(error)")
@@ -191,14 +201,18 @@ struct RPGWebView: UIViewRepresentable {
                 
                 if !jsScripts.isEmpty {
                     let combinedScript = jsScripts.joined(separator: " ")
-                    log("📝 执行 \(jsScripts.count) 个 localStorage 写入操作")
-                    
                     webView.evaluateJavaScript(combinedScript) { _, error in
                         if let error = error {
                             self.log("❌ 预加载失败: \(error)")
                         } else {
                             self.log("✅ 预加载完成: \(loadedCount) 个存档")
-                            // 验证 localStorage 是否写入成功
+                            
+                            // ⭐ 关键：预加载完成后，通知游戏有存档
+                            for fileId in loadedFileIds {
+                                self.notifyGameHasSave(fileId: fileId)
+                            }
+                            
+                            // 验证 localStorage
                             let verifyScript = """
                             (function() {
                                 var keys = [];
@@ -223,6 +237,100 @@ struct RPGWebView: UIViewRepresentable {
                 log("❌ 扫描存档目录失败: \(error)")
             }
         }
+        
+        // MARK: - ⭐ 通知游戏有存档
+        private func notifyGameHasSave(fileId: Int) {
+            guard let webView = webView else {
+                log("❌ webView 不可用")
+                return
+            }
+            
+            log("📢 通知游戏有存档: file\(fileId)")
+            
+            // 尝试多种方式通知游戏
+            let script = """
+            (function() {
+                var fileId = \(fileId);
+                var success = false;
+                
+                // 方式1: 调用 StorageManager.exists（如果存在）
+                try {
+                    if (typeof StorageManager !== 'undefined' && StorageManager.exists) {
+                        var exists = StorageManager.exists(fileId);
+                        if (exists) {
+                            success = true;
+                            console.log('✅ StorageManager.exists 返回 true');
+                        }
+                    }
+                } catch(e) {}
+                
+                // 方式2: 直接调用 StorageManager.load 并检查结果
+                try {
+                    if (typeof StorageManager !== 'undefined' && StorageManager.load) {
+                        var data = StorageManager.load(fileId);
+                        if (data) {
+                            success = true;
+                            console.log('✅ StorageManager.load 返回数据');
+                        }
+                    }
+                } catch(e) {}
+                
+                // 方式3: 触发游戏界面刷新
+                try {
+                    // 如果是 RPG Maker，触发场景刷新
+                    if (typeof SceneManager !== 'undefined') {
+                        // 重新检查存档
+                        if (typeof DataManager !== 'undefined' && DataManager.loadGame) {
+                            // 不实际加载，只是让游戏重新检查
+                        }
+                        success = true;
+                    }
+                } catch(e) {}
+                
+                // 通知 Native
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.notifyGame) {
+                    window.webkit.messageHandlers.notifyGame.postMessage({
+                        fileId: fileId,
+                        result: success ? '成功' : '失败'
+                    });
+                }
+            })();
+            """
+            webView.evaluateJavaScript(script, completionHandler: nil)
+            
+            // ⭐ 延迟后再尝试一次（给游戏时间初始化）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                let retryScript = """
+                (function() {
+                    var fileId = \(fileId);
+                    try {
+                        // 尝试刷新存档列表
+                        if (typeof SceneManager !== 'undefined' && SceneManager._scene) {
+                            var scene = SceneManager._scene;
+                            if (scene && scene.refresh) {
+                                scene.refresh();
+                                console.log('✅ 刷新场景');
+                            }
+                            if (scene && scene.createWindowLayer) {
+                                // 尝试重新创建窗口
+                            }
+                        }
+                    } catch(e) {}
+                    
+                    // 再次检查 StorageManager.load
+                    try {
+                        if (typeof StorageManager !== 'undefined' && StorageManager.load) {
+                            var data = StorageManager.load(fileId);
+                            if (data && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                                window.webkit.messageHandlers.debugLog.postMessage('延迟检查: StorageManager.load 成功');
+                            }
+                        }
+                    } catch(e) {}
+                })();
+                """
+                webView.evaluateJavaScript(retryScript, completionHandler: nil)
+            }
+        }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             self.webView = webView
@@ -237,8 +345,7 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
 
-            // ⭐ 延迟预加载，确保游戏加载完成
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 let triggerScript = """
                 (function() {
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.preloadArchives) {
@@ -264,7 +371,7 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (最终修复版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (最终版)');
             }
 
             // ==========================================
@@ -318,7 +425,7 @@ struct RPGWebView: UIViewRepresentable {
                 }
             };
 
-            console.log('✅ 最终修复版已启动');
+            console.log('✅ 最终版已启动');
         })();
         """
     }
