@@ -26,7 +26,6 @@ struct RPGWebView: UIViewRepresentable {
         contentController.add(context.coordinator, name: "preloadArchives")
         contentController.add(context.coordinator, name: "debugLog")
         contentController.add(context.coordinator, name: "saveData")
-        contentController.add(context.coordinator, name: "extractResult")
 
         let bridgeScript = WKUserScript(
             source: RPGWebView.bridgeJavaScript(),
@@ -68,7 +67,6 @@ struct RPGWebView: UIViewRepresentable {
         let saveDir: URL
         private let logFileURL: URL
         private weak var webView: WKWebView?
-        private var extractButton: UIButton?
 
         init(gamePath: URL) {
             self.gamePath = gamePath
@@ -77,7 +75,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (游戏数据读取版) =====")
+            log("===== Bridge 初始化 (localStorage提取版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -108,8 +106,6 @@ struct RPGWebView: UIViewRepresentable {
                 log("🐛 \(message.body)")
             case "saveData":
                 handleSaveData(message: message)
-            case "extractResult":
-                handleExtractResult(message: message)
             default:
                 log("⚠️ 未知消息: \(message.name)")
             }
@@ -139,127 +135,6 @@ struct RPGWebView: UIViewRepresentable {
             } else {
                 log("⚠️ 数据过小 (\(dataString.count) 字节)")
             }
-        }
-
-        // MARK: - 接收提取结果
-        private func handleExtractResult(message: WKScriptMessage) {
-            guard let dict = message.body as? [String: Any],
-                  let result = dict["result"] as? String else {
-                log("⚠️ 提取结果格式错误")
-                return
-            }
-            log("📊 提取结果: \(result)")
-        }
-
-        // MARK: - 手动提取存档（从游戏数据文件）
-        private func manualExtract() {
-            guard let webView = webView else {
-                log("❌ webView 不可用")
-                return
-            }
-            
-            log("🔍 手动提取存档（从游戏数据文件）...")
-            
-            let script = """
-            (function() {
-                var result = {};
-                var found = false;
-                var dataFiles = ['Actors', 'Classes', 'Items', 'Skills', 'States', 'Enemies', 'Troops', 'Weapons', 'Armors', 'CommonEvents', 'System', 'MapInfos'];
-                var loadedData = {};
-                
-                // 尝试从 gamePath 读取数据文件
-                // 注意：这需要游戏数据文件在 data/ 目录下
-                try {
-                    // 由于 WKWebView 无法直接读取文件系统，我们需要通过其他方式
-                    // 检查 window 上是否有游戏数据
-                    for (var key of dataFiles) {
-                        if (window[key] !== undefined) {
-                            loadedData[key] = window[key];
-                            found = true;
-                            result[key] = '存在';
-                        }
-                    }
-                } catch(e) {}
-                
-                // 尝试从 $data 对象读取
-                try {
-                    if (typeof $data !== 'undefined') {
-                        for (var key in $data) {
-                            if ($data[key] !== undefined && typeof $data[key] === 'object') {
-                                loadedData[key] = $data[key];
-                                found = true;
-                                result['$data.' + key] = '存在';
-                            }
-                        }
-                    }
-                } catch(e) {}
-                
-                // 尝试从 DataManager 读取
-                try {
-                    if (typeof DataManager !== 'undefined') {
-                        if (DataManager._gameData) {
-                            for (var key in DataManager._gameData) {
-                                loadedData[key] = DataManager._gameData[key];
-                                found = true;
-                                result['DataManager.' + key] = '存在';
-                            }
-                        }
-                    }
-                } catch(e) {}
-                
-                // 如果找到了数据，打包发送
-                if (found) {
-                    var jsonData = JSON.stringify(loadedData);
-                    if (jsonData && jsonData.length > 100) {
-                        // 保存到文件
-                        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                            window.webkit.messageHandlers.saveData.postMessage({
-                                fileId: 1,
-                                data: jsonData
-                            });
-                            console.log('📤 游戏数据已保存，长度: ' + jsonData.length);
-                        }
-                    }
-                }
-                
-                // 发送结果报告
-                var msg = found ? '✅ 找到游戏数据: ' + JSON.stringify(result) : '❌ 未找到任何游戏数据';
-                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.extractResult) {
-                    window.webkit.messageHandlers.extractResult.postMessage({ result: msg });
-                }
-                console.log(msg);
-            })();
-            """
-            webView.evaluateJavaScript(script, completionHandler: nil)
-        }
-
-        // MARK: - 添加提取按钮到 WebView
-        private func addExtractButton(to webView: WKWebView) {
-            let button = UIButton(type: .system)
-            button.setTitle("📁 导出数据", for: .normal)
-            button.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.9)
-            button.setTitleColor(.white, for: .normal)
-            button.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
-            button.layer.cornerRadius = 8
-            button.translatesAutoresizingMaskIntoConstraints = false
-            
-            button.addTarget(self, action: #selector(extractButtonTapped), for: .touchUpInside)
-            
-            webView.addSubview(button)
-            NSLayoutConstraint.activate([
-                button.trailingAnchor.constraint(equalTo: webView.trailingAnchor, constant: -20),
-                button.bottomAnchor.constraint(equalTo: webView.bottomAnchor, constant: -100),
-                button.widthAnchor.constraint(equalToConstant: 120),
-                button.heightAnchor.constraint(equalToConstant: 44)
-            ])
-            
-            extractButton = button
-            log("✅ 提取按钮已添加")
-        }
-
-        @objc private func extractButtonTapped() {
-            log("🔄 用户点击提取按钮")
-            manualExtract()
         }
 
         // MARK: - 预加载存档
@@ -340,10 +215,6 @@ struct RPGWebView: UIViewRepresentable {
                 """
                 webView.evaluateJavaScript(triggerScript, completionHandler: nil)
             }
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.addExtractButton(to: webView)
-            }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -360,11 +231,98 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (游戏数据读取版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (localStorage提取版)');
             }
 
-            console.log('✅ 游戏数据读取版已启动');
-            console.log('💡 点击右下角「导出数据」按钮导出游戏数据');
+            // ==========================================
+            // 1. 拦截 StorageManager.save
+            // ==========================================
+            if (typeof StorageManager !== 'undefined') {
+                var originalSave = StorageManager.save;
+                StorageManager.save = function(savefile) {
+                    console.log('📤 StorageManager.save 被调用');
+                    
+                    // 先调用原始方法
+                    var result = originalSave.call(this, savefile);
+                    var fileId = savefile.savefileId || savefile.id || 1;
+                    
+                    // 延迟从 localStorage 读取数据
+                    setTimeout(function() {
+                        try {
+                            var key = 'RPG File' + fileId;
+                            var data = localStorage.getItem(key);
+                            if (data && data.length > 100) {
+                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                    window.webkit.messageHandlers.saveData.postMessage({
+                                        fileId: fileId,
+                                        data: data
+                                    });
+                                    console.log('📤 从 localStorage 提取数据成功，长度: ' + data.length);
+                                }
+                            } else {
+                                console.warn('localStorage 中没有数据: ' + key);
+                            }
+                        } catch(e) {
+                            console.error('提取失败:', e);
+                        }
+                    }, 500);
+                    
+                    return result;
+                };
+            }
+
+            // ==========================================
+            // 2. 拦截 localStorage.setItem（直接捕获）
+            // ==========================================
+            var originalSetItem = localStorage.setItem;
+            localStorage.setItem = function(key, value) {
+                originalSetItem.call(this, key, value);
+                
+                if (key && key.indexOf('RPG File') === 0) {
+                    console.log('📤 localStorage.setItem: ' + key + ', 长度: ' + (value ? value.length : 0));
+                    
+                    // 如果数据长度大于 100，直接保存
+                    if (value && value.length > 100) {
+                        var fileId = parseInt(key.replace('RPG File', ''));
+                        if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                            window.webkit.messageHandlers.saveData.postMessage({
+                                fileId: fileId,
+                                data: value
+                            });
+                            console.log('📤 localStorage.setItem 直接捕获成功，长度: ' + value.length);
+                        }
+                    }
+                }
+            };
+
+            // ==========================================
+            // 3. 定时轮询 localStorage（每 3 秒）
+            // ==========================================
+            var lastData = {};
+            
+            setInterval(function() {
+                try {
+                    for (var i = 0; i < localStorage.length; i++) {
+                        var key = localStorage.key(i);
+                        if (key && key.indexOf('RPG File') === 0) {
+                            var value = localStorage.getItem(key);
+                            if (value && value.length > 100 && lastData[key] !== value) {
+                                lastData[key] = value;
+                                var fileId = parseInt(key.replace('RPG File', ''));
+                                if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                                    window.webkit.messageHandlers.saveData.postMessage({
+                                        fileId: fileId,
+                                        data: value
+                                    });
+                                    console.log('📤 轮询捕获: ' + key + ', 长度: ' + value.length);
+                                }
+                            }
+                        }
+                    }
+                } catch(e) {}
+            }, 3000);
+
+            console.log('✅ localStorage提取版已启动');
         })();
         """
     }
