@@ -75,7 +75,7 @@ struct RPGWebView: UIViewRepresentable {
             self.logFileURL = docs.appendingPathComponent("bridge_log.txt")
             super.init()
             try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
-            log("===== Bridge 初始化 (localStorage提取版) =====")
+            log("===== Bridge 初始化 (最终修复版) =====")
             log("游戏路径: \(gamePath.path)")
             log("存档目录: \(saveDir.path)")
         }
@@ -137,7 +137,7 @@ struct RPGWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - 预加载存档
+        // MARK: - ⭐ 修复：预加载存档到 localStorage
         private func handlePreloadArchives() {
             log("📦 预加载存档到 localStorage")
             
@@ -146,18 +146,32 @@ struct RPGWebView: UIViewRepresentable {
                 return
             }
             
+            // 先检查 save 目录
+            let fileManager = FileManager.default
+            guard fileManager.fileExists(atPath: saveDir.path) else {
+                log("📭 save 目录不存在")
+                return
+            }
+            
             do {
-                let files = try FileManager.default.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
-                var loadedCount = 0
+                let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
+                log("📂 找到 \(files.count) 个文件")
+                
                 var jsScripts: [String] = []
+                var loadedCount = 0
                 
                 for fileURL in files {
                     let fileName = fileURL.lastPathComponent
+                    log("📄 检查文件: \(fileName)")
+                    
                     if fileName.hasPrefix("file") && fileName.hasSuffix(".rpgsave") {
                         let fileIdStr = fileName.replacingOccurrences(of: "file", with: "").replacingOccurrences(of: ".rpgsave", with: "")
                         if let fileId = Int(fileIdStr) {
                             do {
                                 let data = try String(contentsOf: fileURL, encoding: .utf8)
+                                log("📄 读取文件: \(fileName), 大小: \(data.count) 字节")
+                                
+                                // 转义特殊字符
                                 let escapedData = data.replacingOccurrences(of: "\\", with: "\\\\")
                                                          .replacingOccurrences(of: "'", with: "\\'")
                                                          .replacingOccurrences(of: "\n", with: "\\n")
@@ -169,7 +183,7 @@ struct RPGWebView: UIViewRepresentable {
                                 loadedCount += 1
                                 log("📄 预加载: \(key) (\(data.count) 字节)")
                             } catch {
-                                log("⚠️ 读取文件失败: \(fileName)")
+                                log("⚠️ 读取文件失败: \(fileName): \(error)")
                             }
                         }
                     }
@@ -177,11 +191,29 @@ struct RPGWebView: UIViewRepresentable {
                 
                 if !jsScripts.isEmpty {
                     let combinedScript = jsScripts.joined(separator: " ")
+                    log("📝 执行 \(jsScripts.count) 个 localStorage 写入操作")
+                    
                     webView.evaluateJavaScript(combinedScript) { _, error in
                         if let error = error {
                             self.log("❌ 预加载失败: \(error)")
                         } else {
                             self.log("✅ 预加载完成: \(loadedCount) 个存档")
+                            // 验证 localStorage 是否写入成功
+                            let verifyScript = """
+                            (function() {
+                                var keys = [];
+                                for (var i = 0; i < localStorage.length; i++) {
+                                    var key = localStorage.key(i);
+                                    if (key && key.indexOf('RPG File') === 0) {
+                                        keys.push(key + ':' + localStorage.getItem(key).length);
+                                    }
+                                }
+                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.debugLog) {
+                                    window.webkit.messageHandlers.debugLog.postMessage('localStorage 验证: ' + keys.join(', '));
+                                }
+                            })();
+                            """
+                            webView.evaluateJavaScript(verifyScript, completionHandler: nil)
                         }
                     }
                 } else {
@@ -205,7 +237,8 @@ struct RPGWebView: UIViewRepresentable {
                 }
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // ⭐ 延迟预加载，确保游戏加载完成
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 let triggerScript = """
                 (function() {
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.preloadArchives) {
@@ -231,22 +264,19 @@ struct RPGWebView: UIViewRepresentable {
         return """
         (function() {
             if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridgeReady) {
-                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (localStorage提取版)');
+                window.webkit.messageHandlers.bridgeReady.postMessage('JS 注入开始 (最终修复版)');
             }
 
             // ==========================================
-            // 1. 拦截 StorageManager.save
+            // 拦截 StorageManager.save
             // ==========================================
             if (typeof StorageManager !== 'undefined') {
                 var originalSave = StorageManager.save;
                 StorageManager.save = function(savefile) {
                     console.log('📤 StorageManager.save 被调用');
-                    
-                    // 先调用原始方法
                     var result = originalSave.call(this, savefile);
                     var fileId = savefile.savefileId || savefile.id || 1;
                     
-                    // 延迟从 localStorage 读取数据
                     setTimeout(function() {
                         try {
                             var key = 'RPG File' + fileId;
@@ -259,8 +289,6 @@ struct RPGWebView: UIViewRepresentable {
                                     });
                                     console.log('📤 从 localStorage 提取数据成功，长度: ' + data.length);
                                 }
-                            } else {
-                                console.warn('localStorage 中没有数据: ' + key);
                             }
                         } catch(e) {
                             console.error('提取失败:', e);
@@ -272,57 +300,25 @@ struct RPGWebView: UIViewRepresentable {
             }
 
             // ==========================================
-            // 2. 拦截 localStorage.setItem（直接捕获）
+            // 拦截 localStorage.setItem
             // ==========================================
             var originalSetItem = localStorage.setItem;
             localStorage.setItem = function(key, value) {
                 originalSetItem.call(this, key, value);
                 
-                if (key && key.indexOf('RPG File') === 0) {
-                    console.log('📤 localStorage.setItem: ' + key + ', 长度: ' + (value ? value.length : 0));
-                    
-                    // 如果数据长度大于 100，直接保存
-                    if (value && value.length > 100) {
-                        var fileId = parseInt(key.replace('RPG File', ''));
-                        if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                            window.webkit.messageHandlers.saveData.postMessage({
-                                fileId: fileId,
-                                data: value
-                            });
-                            console.log('📤 localStorage.setItem 直接捕获成功，长度: ' + value.length);
-                        }
+                if (key && key.indexOf('RPG File') === 0 && value && value.length > 100) {
+                    var fileId = parseInt(key.replace('RPG File', ''));
+                    if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
+                        window.webkit.messageHandlers.saveData.postMessage({
+                            fileId: fileId,
+                            data: value
+                        });
+                        console.log('📤 localStorage.setItem 直接捕获: ' + key + ', 长度: ' + value.length);
                     }
                 }
             };
 
-            // ==========================================
-            // 3. 定时轮询 localStorage（每 3 秒）
-            // ==========================================
-            var lastData = {};
-            
-            setInterval(function() {
-                try {
-                    for (var i = 0; i < localStorage.length; i++) {
-                        var key = localStorage.key(i);
-                        if (key && key.indexOf('RPG File') === 0) {
-                            var value = localStorage.getItem(key);
-                            if (value && value.length > 100 && lastData[key] !== value) {
-                                lastData[key] = value;
-                                var fileId = parseInt(key.replace('RPG File', ''));
-                                if (!isNaN(fileId) && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveData) {
-                                    window.webkit.messageHandlers.saveData.postMessage({
-                                        fileId: fileId,
-                                        data: value
-                                    });
-                                    console.log('📤 轮询捕获: ' + key + ', 长度: ' + value.length);
-                                }
-                            }
-                        }
-                    }
-                } catch(e) {}
-            }, 3000);
-
-            console.log('✅ localStorage提取版已启动');
+            console.log('✅ 最终修复版已启动');
         })();
         """
     }
